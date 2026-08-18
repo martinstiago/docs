@@ -11725,7 +11725,7 @@ Roark connects to Pipecat through a single observer, then layers testing and mon
     ```python
     import os
 
-    from pipecat.pipeline.task import PipelineParams, PipelineTask
+    from pipecat.pipeline.worker import PipelineWorker
     from pipecat_roark import RoarkObserver
 
     roark = RoarkObserver(
@@ -11742,7 +11742,7 @@ Roark connects to Pipecat through a single observer, then layers testing and mon
         context_aggregator.assistant(),
     ])
 
-    task = PipelineTask(pipeline, params=PipelineParams(observers=[roark]))
+    worker = PipelineWorker(pipeline, observers=[roark])
     ```
 
     <Tip>
@@ -11832,7 +11832,7 @@ Every call — simulated or live — is scored against the same metric library, 
 
 Roark ingests [OpenTelemetry](https://opentelemetry.io/docs/what-is-opentelemetry/) traces from Pipecat's built-in tracing, so each call's full turn tree — STT, LLM, TTS, and tool calls, with latency at every span — shows up on the **Tracing** tab of the call.
 
-Configure the tracer provider **before** constructing `PipelineTask` (Pipecat grabs the provider at task-init time), and pass the **same** call ID to both `RoarkObserver(pipecat_call_id=...)` and `PipelineTask(conversation_id=...)` so Roark can link the trace to the call.
+Configure the tracer provider **before** constructing `PipelineWorker` (Pipecat grabs the provider at task-init time), and pass the **same** call ID to both `RoarkObserver(pipecat_call_id=...)` and `PipelineWorker(conversation_id=...)` so Roark can link the trace to the call.
 
 ```python
 import os
@@ -11843,12 +11843,12 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat_roark import RoarkObserver
 
 
 def setup_roark_tracing() -> None:
-    """Must run BEFORE constructing PipelineTask."""
+    """Must run BEFORE constructing PipelineWorker."""
     resource = Resource.create({
         "deployment.environment": os.getenv("ENVIRONMENT", "production"),
         # Optional: tag spans for the trace explorer.
@@ -11878,9 +11878,9 @@ roark = RoarkObserver(
     pipecat_call_id=call_id,  # appears on the Roark record as pipecatCallId
 )
 
-task = PipelineTask(
+worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(observers=[roark]),
+    observers=[roark],
     enable_tracing=True,
     conversation_id=call_id,  # set as the conversation.id span attribute
 )
@@ -24167,7 +24167,12 @@ The base image supports multiple Python versions. The default Python version is 
 - `dailyco/pipecat-base:0.1.0-py3.13` (Python 3.13)
 - `dailyco/pipecat-base:0.1.0-py3.14` (Python 3.14)
 
-<Tip>For production use, we recommend pinning to specific versions.</Tip>
+<Tip>
+  For production use, we recommend pinning to specific versions. A `:latest` tag
+  can change without your project changing, so a deploy can leave your warm
+  instances on the old image
+  ([why](/pipecat-cloud/fundamentals/deploy#when-a-deploy-does-not-replace-running-agents)).
+</Tip>
 
 ## Using a custom image
 
@@ -24242,6 +24247,12 @@ pipecat cloud deploy
 ```
 
 The CLI builds your image in the cloud from your project's Dockerfile and deploys it - no container registry setup needed. For more details on how cloud builds work, see the [Cloud Builds guide](/pipecat-cloud/guides/cloud-builds).
+
+<Tip>
+  Prefer not to deploy by hand? Connect a GitHub repository to your agent and
+  every push to the connected branch deploys it. See [Deploy from
+  GitHub](/pipecat-cloud/guides/deploy-from-github).
+</Tip>
 
 ### Deploying to a specific region
 
@@ -24375,6 +24386,10 @@ To avoid interruption of any active sessions, any running agent instances will c
 Idle agent instances in your agent pool will be replaced with the new configuration according to the Pipecat Cloud auto-scaling strategy.
 New agent requests may, therefore, start with prior deployment configuration if updates are not fully propagated. This ensures on-demand availability
 remains consistent and avoids potential cold starts.
+
+### When a deploy does not replace running agents
+
+A deploy only replaces your running agent instances when it creates a new version of your agent, so a routine deploy can't cut off a session that is already in progress. Some changes look like no change and keep the current version: a scaling-only change (`min-agents` or `max-agents`), an image tag you already deployed (Pipecat Cloud stores the tag, not the image behind it, so re-pushing to a tag like `:latest` looks identical), and a new value for a secret in a set you already use. If you keep warm instances (`min-agents` set to 1 or higher), they can keep serving your old code while the deploy reports success. Run [`pipecat cloud deploy --force`](/api-reference/cli/cloud/deploy) to force a new version.
 
 ### Failed deployments
 
@@ -24825,8 +24840,11 @@ pipecat cloud secrets set my-secrets SECRET_NAME_3 secret-value-3
 ```
 
 <Info>
-  Whenever a secret is added or updated in an existing set, any deployments
-  using that set will need to be redeployed to access the new values.
+  Whenever a secret is added or updated in an existing set, any deployments using
+  that set will need to be redeployed to access the new values. A plain
+  `pipecat cloud deploy` looks like no change here, so use
+  `pipecat cloud deploy --force`
+  ([why](/pipecat-cloud/fundamentals/deploy#when-a-deploy-does-not-replace-running-agents)).
 </Info>
 
 #### Provisioning and readiness
@@ -25650,6 +25668,12 @@ Build and deploy agents on Pipecat Cloud without managing your own container reg
 
 Pipecat Cloud Build lets you deploy agents directly from your source code. Instead of building Docker images locally and pushing them to a registry, just run `pipecat cloud deploy` and the CLI handles everything.
 
+<Tip>
+  The same build service backs the [GitHub
+  integration](/pipecat-cloud/guides/deploy-from-github), which builds and
+  deploys your agent on every push to a connected branch — no CLI required.
+</Tip>
+
 ## Prerequisites
 
 - A [Pipecat Cloud account](/pipecat-cloud/fundamentals/accounts-and-organizations) with an active organization
@@ -25830,6 +25854,165 @@ See the [deploy command reference](/api-reference/cli/cloud/deploy#configuration
     Full reference for build management commands.
   </Card>
 </CardGroup>
+
+# Deploy from GitHub
+Source: https://docs.pipecat.ai/pipecat-cloud/guides/deploy-from-github.md
+
+Connect the Pipecat Cloud GitHub App to deploy agents from a repository branch, with deploy on push, manual deploys, and commit tracking.
+
+Connect a GitHub repository to an agent and Pipecat Cloud builds and deploys it for you. Push to the connected branch and your agent updates — no Docker build, no registry, no CI workflow to maintain.
+
+<Info>
+  The GitHub integration is configured from the [Pipecat Cloud dashboard{" "}
+  <Icon icon="arrow-up-right-from-square" iconType="solid" />
+  ](https://pipecat.daily.co). Deploys still use [cloud
+  builds](/pipecat-cloud/guides/cloud-builds) under the hood, so your project
+  needs a `Dockerfile`.
+</Info>
+
+## Choosing a deployment method
+
+Pipecat Cloud gives you three ways to ship an agent. They all end up building the same image:
+
+| Method                                                         | Best for                                                               |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **GitHub integration** (this guide)                            | Push-to-deploy with no CI setup. Configured entirely in the dashboard. |
+| [CLI cloud builds](/pipecat-cloud/guides/cloud-builds)         | Deploying from your laptop, or from a script that already has the CLI. |
+| [GitHub Actions](/pipecat-cloud/guides/ci-with-github-actions) | Pipelines that need tests, approvals, or custom steps before a deploy. |
+
+You can mix them. An agent connected to a repository can still be deployed with the CLI, though the next push to the connected branch will deploy over it.
+
+## Prerequisites
+
+- A [Pipecat Cloud account](/pipecat-cloud/fundamentals/accounts-and-organizations) with an active organization
+- A GitHub repository containing your agent, with a `Dockerfile` at the repository root (or at a path you specify)
+- Permission to install a GitHub App on the account or organization that owns the repository
+
+## Connect your GitHub account
+
+The GitHub App is installed once per Pipecat Cloud organization, and every agent in that organization shares it.
+
+<Steps>
+  <Step title="Open GitHub settings">
+    In the dashboard, go to **Settings → GitHub**.
+  </Step>
+  <Step title="Install the app">
+    Click **Connect GitHub**. A new tab opens GitHub's installation screen,
+    where you choose the account or organization to install into and which
+    repositories to grant access to — all of them, or a hand-picked list.
+  </Step>
+  <Step title="Return to the dashboard">
+    Once you approve the install, the dashboard picks up the connection
+    automatically and shows the connected account.
+  </Step>
+</Steps>
+
+<Tip>
+  Granting access to only the repositories you deploy from is the safer default.
+  You can change the selection later from **Manage on GitHub** without
+  reconnecting.
+</Tip>
+
+## Deploy a new agent from a repository
+
+When you create an agent, choose **GitHub** as the source:
+
+<Steps>
+  <Step title="Pick the repository">
+    Select any repository the installation can see. Private repositories are
+    supported.
+  </Step>
+  <Step title="Pick the branch">
+    The repository's default branch is preselected. Search to find any other
+    branch.
+  </Step>
+  <Step title="Set the Dockerfile path (optional)">
+    Defaults to `Dockerfile` at the repository root. Set a path such as
+    `docker/Dockerfile` if yours lives elsewhere.
+  </Step>
+</Steps>
+
+Creating the agent builds the branch's current commit and deploys it.
+
+## Connect an existing agent
+
+Agents that already run a Docker image can be moved onto GitHub deploys at any time.
+
+Go to your agent's **Settings → GitHub** tab and pick a repository, branch, and Dockerfile path.
+
+<Note>
+  Linking a repository does not deploy anything. The agent keeps serving its
+  current image until the next push to the connected branch, or until you deploy
+  manually. This lets you connect a repository and choose your moment.
+</Note>
+
+## Deploy on push
+
+**Deploy on push** is on by default. With it enabled, every push to the connected branch builds that commit and rolls it out.
+
+Pushes to any other branch are ignored — only the branch you connected triggers a deploy.
+
+Turn it off from the agent's **Settings → GitHub** tab when you want to control the timing yourself, for example while you're stabilizing a branch.
+
+## Deploy manually
+
+The **Deploy** button on the agent's GitHub settings builds and deploys the connected branch's current `HEAD`. It works whether or not deploy on push is enabled, and it's the way to ship a change when it's off.
+
+Deploys are queued: the button returns as soon as the build is accepted, and progress shows up in the agent's deployment history and on the [Builds](/pipecat-cloud/guides/cloud-builds) page.
+
+## See what's running
+
+An agent deployed from GitHub shows its source and the exact commit it is running — on the agent overview and in the agents list — linked back to that commit on GitHub.
+
+The commit that's running and the branch that's connected can legitimately differ: right after you link a repository, after you re-point an agent at a different repository or branch, or when deploy on push is off and there are unshipped commits. The dashboard says so and offers a deploy when that's the case.
+
+## Change or remove a connection
+
+<AccordionGroup>
+  <Accordion title="Switch branch or repository">
+    Edit the repository, branch, or Dockerfile path on the agent's **Settings →
+    GitHub** tab and save. The running deployment is untouched until the next
+    deploy.
+  </Accordion>
+  <Accordion title="Unlink one agent">
+    **Unlink** removes the agent's connection to the repository. Pushes stop
+    deploying it, and its current deployment stays live.
+  </Accordion>
+  <Accordion title="Disconnect the organization">
+    **Disconnect** on **Settings → GitHub** removes the installation and every
+    repository link in the organization. Connected agents stop auto-deploying
+    and keep running what they last deployed. This does not uninstall the app on
+    GitHub — do that from GitHub if you want to revoke access entirely.
+  </Accordion>
+</AccordionGroup>
+
+## Things to know
+
+- **One agent per repository and branch.** A given repository and branch pair can be connected to a single agent. Use a different branch, or a different repository, for a second agent.
+- **Each agent connects to one branch.** To run staging and production from one repository, create two agents and connect each to its own branch.
+- **A `Dockerfile` is required.** The build follows the same path as [cloud builds](/pipecat-cloud/guides/cloud-builds). Run `pipecat init` to scaffold a project that already has one.
+- **Secrets are configured in Pipecat Cloud**, not in your repository. See [Secrets](/pipecat-cloud/fundamentals/secrets).
+- **A suspended installation stops deploys.** If the app is suspended on GitHub, the dashboard flags it; reinstate it from GitHub to resume.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="A repository is missing from the picker">
+    The installation can only see repositories you granted it. Open **Settings →
+    GitHub → Manage on GitHub** and add the repository to the installation's
+    access list.
+  </Accordion>
+  <Accordion title="A push didn't deploy">
+    Check that the push went to the connected branch, that **Deploy on push** is
+    enabled on the agent, and that the installation isn't suspended on GitHub.
+  </Accordion>
+  <Accordion title="The build failed">
+    Build logs are on the agent's deployment history. The most common causes are
+    a `Dockerfile` path that doesn't match the repository and a build that
+    succeeds locally but not from a clean checkout — check that everything the
+    build needs is committed.
+  </Accordion>
+</AccordionGroup>
 
 # Pipecat Cloud Capacity Planning
 Source: https://docs.pipecat.ai/pipecat-cloud/guides/capacity-planning.md
@@ -26389,6 +26572,13 @@ Source: https://docs.pipecat.ai/pipecat-cloud/guides/ci-with-github-actions.md
 Automate Pipecat Cloud builds and deploys from CI using the official pipecat-ai GitHub Action in your workflow.
 
 This guide shows you how to automate Pipecat Cloud deployments from GitHub Actions using the official [Deploy to Pipecat Cloud](https://github.com/daily-co/pipecat-cloud-deploy-action) action.
+
+<Note>
+  If you only need push-to-deploy, the [GitHub
+  integration](/pipecat-cloud/guides/deploy-from-github) does that with no
+  workflow file and no API key to manage. Reach for a GitHub Actions workflow
+  when a deploy has to run tests, wait on an approval, or do custom steps.
+</Note>
 
 ## Prerequisites
 
@@ -29643,6 +29833,7 @@ Analytics services help you better understand how your service operates.
 | Service                                                                 | Setup                                          | Maintainer |
 | ----------------------------------------------------------------------- | ---------------------------------------------- | ---------- |
 | [Finchvox](/api-reference/server/services/analytics/finchvox)           | `uv add finchvox`                              | Community  |
+| [floe-guard](/api-reference/server/services/analytics/floe-guard)       | `uv add "floe-guard[pipecat]"`                 | Community  |
 | [Future AGI](/api-reference/server/services/analytics/future-agi)       | `uv add traceAI-pipecat`                       | Community  |
 | [Noveum Trace](/api-reference/server/services/analytics/noveum-trace)   | `uv add "noveum-trace[pipecat]"`               | Community  |
 | [OpenInference](/api-reference/server/services/analytics/openinference) | `uv add openinference-instrumentation-pipecat` | Community  |
@@ -29687,9 +29878,10 @@ Image generation services receive text inputs and output images.
 
 Knowledge retrieval services enable context-aware search and retrieval of relevant information.
 
-| Service                                                         | Setup                 | Maintainer |
-| --------------------------------------------------------------- | --------------------- | ---------- |
-| [Moss](/api-reference/server/services/knowledge-retrieval/moss) | `uv add pipecat-moss` | Community  |
+| Service                                                                 | Setup                           | Maintainer |
+| ----------------------------------------------------------------------- | ------------------------------- | ---------- |
+| [Keenable](/api-reference/server/services/knowledge-retrieval/keenable) | `uv add "pipecat-ai[keenable]"` | Pipecat    |
+| [Moss](/api-reference/server/services/knowledge-retrieval/moss)         | `uv add pipecat-moss`           | Community  |
 
 ## Large Language Models
 
@@ -29823,6 +30015,7 @@ Text-to-Speech services receive text input and output audio streams or chunks.
 | [ElevenLabs](/api-reference/server/services/tts/elevenlabs)       | `uv add "pipecat-ai[elevenlabs]"`                                             | Pipecat    |
 | [Fish](/api-reference/server/services/tts/fish)                   | `uv add "pipecat-ai[fish]"`                                                   | Pipecat    |
 | [Floe](/api-reference/server/services/tts/floe)                   | `uv add pipecat-floe`                                                         | Community  |
+| [Gandr](/api-reference/server/services/tts/gandr)                 | `uv add pipecat-gandr`                                                        | Community  |
 | [Gnani](/api-reference/server/services/tts/gnani)                 | `uv add pipecat-gnani`                                                        | Community  |
 | [Google](/api-reference/server/services/tts/google)               | `uv add "pipecat-ai[google]"`                                                 | Pipecat    |
 | [Gradium](/api-reference/server/services/tts/gradium)             | `uv add "pipecat-ai[gradium]"`                                                | Pipecat    |
@@ -29851,7 +30044,9 @@ Text-to-Speech services receive text input and output audio streams or chunks.
 | [Simplismart](/api-reference/server/services/tts/simplismart)     | `uv add pipecat-simplismart`                                                  | Community  |
 | [SLNG](/api-reference/server/services/tts/slng)                   | `uv add pipecat-slng`                                                         | Community  |
 | [Smallest AI](/api-reference/server/services/tts/smallest)        | `uv add "pipecat-ai[smallest]"`                                               | Pipecat    |
+| [SonexLabs](/api-reference/server/services/tts/sonex)             | `uv add pipecat-sonex`                                                        | Community  |
 | [Soniox](/api-reference/server/services/tts/soniox)               | `uv add "pipecat-ai[soniox]"`                                                 | Pipecat    |
+| [Speechify](/api-reference/server/services/tts/speechify)         | `uv add "pipecat-ai[speechify]"`                                              | Pipecat    |
 | [Speechmatics](/api-reference/server/services/tts/speechmatics)   | `uv add "pipecat-ai[speechmatics]"`                                           | Pipecat    |
 | [Supertonic](/api-reference/server/services/tts/supertonic)       | `uv add pipecat-supertonic`                                                   | Community  |
 | [Together AI](/api-reference/server/services/tts/together)        | `uv add "pipecat-ai[together]"`                                               | Pipecat    |
@@ -31286,7 +31481,7 @@ Before using HeyGen video services, you need:
   HeyGen API key for authentication.
 </ParamField>
 
-<ParamField path="params" type="HeyGenParams" default="HeyGenParams()">
+<ParamField path="params" type="HeyGenParams | None" default="None">
   Transport configuration parameters.
 </ParamField>
 
@@ -31495,7 +31690,7 @@ Before using LemonSlice video services, you need:
   [LemonSliceNewSessionRequest](#lemonslicenewsessionrequest) below.
 </ParamField>
 
-<ParamField path="params" type="LemonSliceParams" default="LemonSliceParams()">
+<ParamField path="params" type="LemonSliceParams | None" default="None">
   Transport configuration parameters. See [LemonSliceParams](#lemonsliceparams)
   below.
 </ParamField>
@@ -32440,7 +32635,7 @@ Before using TavusTransport, you need:
   expect audio over the `conversation.echo` app message API.
 </ParamField>
 
-<ParamField path="params" type="TavusParams" default="TavusParams()">
+<ParamField path="params" type="TavusParams | None" default="None">
   Transport configuration parameters.
 </ParamField>
 
@@ -34027,7 +34222,7 @@ Pass the serializer to a `FastAPIWebsocketTransport` through
 ```python
 from fastapi import WebSocket
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
     FastAPIWebsocketParams,
@@ -34053,7 +34248,7 @@ async def run_bot(websocket: WebSocket):
         ]
     )
 
-    task = PipelineTask(pipeline)
+    worker = PipelineWorker(pipeline)
     # ... run the pipeline
 ```
 
@@ -35562,8 +35757,9 @@ Before using AssemblyAI STT services, you need:
   WebSocket endpoint URL. Override for custom or proxied deployments.
 </ParamField>
 
-<ParamField path="sample_rate" type="int" default="16000">
-  Audio sample rate in Hz.
+<ParamField path="sample_rate" type="int | None" default="None">
+  Audio sample rate in Hz. If None, uses the input sample rate from the start
+  frame.
 </ParamField>
 
 <ParamField path="encoding" type="str" default="pcm_s16le">
@@ -39394,7 +39590,7 @@ Before using Moonshine STT service, you need:
 ### Configuration Options
 
 - **Model Size**: Balance between accuracy and performance based on your needs
-- **Language Support**: Moonshine supports English, Spanish, and other languages
+- **Language Support**: Moonshine supports Arabic, Chinese, English, Japanese, Korean, Spanish, Ukrainian, and Vietnamese
 - **No API Key**: Runs entirely locally for complete privacy
 
 <Tip>
@@ -39413,10 +39609,10 @@ Before using Moonshine STT service, you need:
 
 Runtime-configurable settings passed via the `settings` constructor argument using `MoonshineSTTService.Settings(...)`. These can be updated mid-conversation with `STTUpdateSettingsFrame`. See [Service Settings](/pipecat/fundamentals/service-settings) for details.
 
-| Parameter  | Type              | Default                 | Description                                                                                                                                                                           |
-| ---------- | ----------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`    | `str \| Model`    | `Model.SMALL_STREAMING` | Moonshine model architecture. Available models: `TINY`, `BASE`, `TINY_STREAMING`, `BASE_STREAMING`, `SMALL_STREAMING` (default), `MEDIUM_STREAMING`.                                  |
-| `language` | `Language \| str` | `Language.EN`           | Language for transcription. Moonshine supports English, Spanish, and other languages. The base language code is used (e.g., "en" from "en-US"). _(Inherited from base STT settings.)_ |
+| Parameter  | Type              | Default                 | Description                                                                                                                                                                                                                                                                                                                      |
+| ---------- | ----------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`    | `str \| Model`    | `Model.SMALL_STREAMING` | Moonshine model architecture. Available models: `TINY`, `BASE`, `TINY_STREAMING`, `BASE_STREAMING`, `SMALL_STREAMING` (default), `MEDIUM_STREAMING`. Streaming architectures are published for English only; other languages have one or two models. An unavailable architecture falls back to the best model for that language. |
+| `language` | `Language \| str` | `Language.EN`           | Language for transcription. Moonshine publishes models for Arabic, Chinese, English, Japanese, Korean, Spanish, Ukrainian, and Vietnamese; regional variants (e.g., `Language.ES_MX`) resolve to their base code. _(Inherited from base STT settings.)_                                                                          |
 
 ## Usage
 
@@ -39469,11 +39665,12 @@ stt = MoonshineSTTService(
 ## Notes
 
 - **First run downloads**: The selected model downloads from the Moonshine model hub on first use and is cached locally. Later runs load it from the cache.
+- **Runtime model reloading**: Models are language-specific, so a `language` or `model` change reloads the model (including via `set_language()` or `STTUpdateSettingsFrame`). A failed reload keeps the loaded model and pushes an `ErrorFrame`.
 - **Segmented transcription**: `MoonshineSTTService` extends `SegmentedSTTService`, meaning it processes complete audio segments after VAD detects the user has stopped speaking.
 - **CPU-only**: Moonshine runs efficiently on CPU via ONNX Runtime, so no GPU is required. This makes it ideal for resource-constrained environments.
 - **Audio format**: Expects 16-bit mono PCM audio at 16 kHz sample rate.
 - **Model variants**: The streaming-capable models (`TINY_STREAMING`, `SMALL_STREAMING`, `MEDIUM_STREAMING`) can be run in batch mode just like the non-streaming variants. The larger streaming models (`SMALL_STREAMING`, `MEDIUM_STREAMING`) are only available in streaming form.
-- **Language support**: Moonshine supports multiple languages (English, Spanish, and others). The service uses the base language code (e.g., "en" from "en-US").
+- **Language support**: Moonshine supports Arabic, Chinese, English, Japanese, Korean, Spanish, Ukrainian, and Vietnamese. Regional variants (e.g., `Language.ES_MX`) resolve to their base code. The non-English models are released under the non-commercial Moonshine Community License.
 - **No external dependencies**: Unlike API-based STT services, Moonshine requires no API keys or network connectivity after the initial model download.
 
 # NVIDIA Nemotron Speech-to-Text
@@ -42402,9 +42599,9 @@ Before using xAI STT services, you need:
   WebSocket endpoint URL for xAI STT.
 </ParamField>
 
-<ParamField path="sample_rate" type="int" default="16000">
+<ParamField path="sample_rate" type="int | None" default="None">
   Audio sample rate in Hz. Supported values: 8000, 16000, 22050, 24000, 44100,
-  48000.
+  48000. If None, uses the input sample rate from the start frame.
 </ParamField>
 
 <ParamField path="encoding" type="str" default="pcm">
@@ -43400,7 +43597,7 @@ llm = BasetenLLMService(
 ## Notes
 
 - **Model APIs vs. Dedicated Deployments**: The default `base_url` connects to Baseten's serverless Model APIs. For dedicated deployments on your own GPUs, set `base_url` to your deployment's `/sync/v1` endpoint URL.
-- **Token Usage Reporting**: Baseten reports cumulative token usage on every streamed chunk. The service automatically accumulates these values and reports the final total once at the end of processing.
+- **Token Usage Reporting**: Token usage is reported once per completion at the end of processing.
 - **Message Roles**: Baseten supports `system`, `user`, `assistant`, and `tool` message roles. The `developer` role is not supported.
 - **OpenAI Compatibility**: Baseten fully supports the OpenAI-compatible parameter set inherited from `OpenAILLMService`, including function calling and streaming responses.
 
@@ -43798,7 +43995,9 @@ from pipecat.services.deepseek import DeepSeekLLMService
 
 llm = DeepSeekLLMService(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
-    model="deepseek-chat",
+    settings=DeepSeekLLMService.Settings(
+        model="deepseek-v4-flash",
+    ),
 )
 ```
 
@@ -43810,7 +44009,7 @@ from pipecat.services.deepseek import DeepSeekLLMService
 llm = DeepSeekLLMService(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     settings=DeepSeekLLMService.Settings(
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
         temperature=0.7,
         top_p=0.9,
         max_tokens=2048,
@@ -44138,7 +44337,7 @@ Before using Google Gemini LLM services, you need:
 
 1. **Google Account**: Sign up at [Google AI Studio](https://aistudio.google.com/)
 2. **API Key**: Generate a Gemini API key from AI Studio
-3. **Model Selection**: Choose from available Gemini models (Gemini 2.5 Flash, Gemini 2.5 Pro, etc.)
+3. **Model Selection**: Choose from available Gemini models
 
 ### Required Environment Variables
 
@@ -44151,9 +44350,8 @@ Before using Google Gemini LLM services, you need:
 </ParamField>
 
 <ParamField path="model" type="str" default="None" deprecated>
-  Gemini model name to use (e.g., `"gemini-2.5-flash"`, `"gemini-2.5-pro"`).
-  *Deprecated in v0.0.105. Use `settings=GoogleLLMService.Settings(...)`
-  instead.*
+  Gemini model name to use. *Deprecated in v0.0.105. Use
+  `settings=GoogleLLMService.Settings(...)` instead.*
 </ParamField>
 
 <ParamField path="settings" type="GoogleLLMService.Settings" default="None">
@@ -44184,20 +44382,43 @@ Before using Google Gemini LLM services, you need:
   HTTP options for the Google API client.
 </ParamField>
 
+<ParamField path="stream_idle_timeout_secs" type="float | None" default="20.0">
+  How long to wait for the next chunk of a streamed response before giving up on
+  it. Bounds the wait when the API accepts a request and then stops producing
+  without closing the stream. This is a gap between chunks, not a limit on how
+  long a response may take overall. The first chunk is the slowest, since its
+  wait spans the whole round trip including any thinking the model does before
+  it emits anything; raise this for models configured to think at length. Set to
+  `None` to wait indefinitely.
+</ParamField>
+
+<ParamField path="retry_timeout_secs" type="float | None" default="5.0">
+  How long to wait for the first chunk before giving up on the request and
+  re-issuing it, when `retry_on_timeout` is set. Like the first-chunk wait
+  above, this window spans the whole round trip including any thinking, so it is
+  only a good fit for models that start emitting quickly.
+</ParamField>
+
+<ParamField path="retry_on_timeout" type="bool | None" default="False">
+  Whether to re-issue the request once if the first chunk doesn't arrive within
+  `retry_timeout_secs`. Only the first chunk is retried: once a chunk has been
+  pushed downstream, re-issuing would duplicate the response.
+</ParamField>
+
 ### Settings
 
 Runtime-configurable settings passed via the `settings` constructor argument using `GoogleLLMService.Settings(...)`. These can be updated mid-conversation with `LLMUpdateSettingsFrame`. See [Service Settings](/pipecat/fundamentals/service-settings) for details.
 
-| Parameter            | Type                   | Default     | Description                                                                                        |
-| -------------------- | ---------------------- | ----------- | -------------------------------------------------------------------------------------------------- |
-| `model`              | `str`                  | `None`      | Gemini model identifier. _(Inherited from base settings.)_                                         |
-| `system_instruction` | `str`                  | `None`      | System instruction/prompt for the model. _(Inherited from base settings.)_                         |
-| `max_tokens`         | `int`                  | `NOT_GIVEN` | Maximum number of tokens to generate.                                                              |
-| `temperature`        | `float`                | `NOT_GIVEN` | Sampling temperature (0.0 to 2.0). Lower values are more focused, higher values are more creative. |
-| `top_k`              | `int`                  | `NOT_GIVEN` | Top-k sampling parameter. Limits tokens to the top k most likely.                                  |
-| `top_p`              | `float`                | `NOT_GIVEN` | Top-p (nucleus) sampling (0.0 to 1.0). Controls diversity of output.                               |
-| `thinking`           | `GoogleThinkingConfig` | `NOT_GIVEN` | Thinking configuration. See [GoogleThinkingConfig](#googlethinkingconfig) below.                   |
-| `safety_settings`    | `list[SafetySetting]`  | `NOT_GIVEN` | Content safety filters. Each entry pairs a harm category with a blocking threshold.                |
+| Parameter            | Type                   | Default            | Description                                                                                        |
+| -------------------- | ---------------------- | ------------------ | -------------------------------------------------------------------------------------------------- |
+| `model`              | `str`                  | `gemini-3.6-flash` | Gemini model identifier. _(Inherited from base settings.)_                                         |
+| `system_instruction` | `str`                  | `None`             | System instruction/prompt for the model. _(Inherited from base settings.)_                         |
+| `max_tokens`         | `int`                  | `NOT_GIVEN`        | Maximum number of tokens to generate.                                                              |
+| `temperature`        | `float`                | `NOT_GIVEN`        | Sampling temperature (0.0 to 2.0). Lower values are more focused, higher values are more creative. |
+| `top_k`              | `int`                  | `NOT_GIVEN`        | Top-k sampling parameter. Limits tokens to the top k most likely.                                  |
+| `top_p`              | `float`                | `NOT_GIVEN`        | Top-p (nucleus) sampling (0.0 to 1.0). Controls diversity of output.                               |
+| `thinking`           | `GoogleThinkingConfig` | `NOT_GIVEN`        | Thinking configuration. See [GoogleThinkingConfig](#googlethinkingconfig) below.                   |
+| `safety_settings`    | `list[SafetySetting]`  | `NOT_GIVEN`        | Content safety filters. Each entry pairs a harm category with a blocking threshold.                |
 
 <Note>
   `NOT_GIVEN` values are omitted from the API request, letting the Gemini API
@@ -44231,7 +44452,7 @@ from pipecat.services.google import GoogleLLMService
 
 llm = GoogleLLMService(
     api_key=os.getenv("GOOGLE_API_KEY"),
-    model="gemini-2.5-flash",
+    model="gemini-3.5-flash",
 )
 ```
 
@@ -44272,7 +44493,7 @@ llm = GoogleLLMService(
 llm = GoogleLLMService(
     api_key=os.getenv("GOOGLE_API_KEY"),
     settings=GoogleLLMService.Settings(
-        model="gemini-3-flash",
+        model="gemini-3.5-flash",
         max_tokens=8192,
         thinking=GoogleLLMService.GoogleThinkingConfig(
             thinking_level="high",
@@ -44290,7 +44511,7 @@ from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySetting
 llm = GoogleLLMService(
     api_key=os.getenv("GOOGLE_API_KEY"),
     settings=GoogleLLMService.Settings(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash",
         safety_settings=[
             SafetySetting(
                 category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
@@ -44356,10 +44577,10 @@ await worker.queue_frame(
 
 `GoogleLLMService` supports the following event handlers, inherited from [LLMService](/api-reference/server/events/service-events):
 
-| Event                       | Description                                                                 |
-| --------------------------- | --------------------------------------------------------------------------- |
-| `on_completion_timeout`     | Called when an LLM completion request times out (Google `DeadlineExceeded`) |
-| `on_function_calls_started` | Called when function calls are received and execution is about to start     |
+| Event                       | Description                                                                                                |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `on_completion_timeout`     | Called when an LLM completion request times out (Google `DeadlineExceeded` or stream idle timeout reached) |
+| `on_function_calls_started` | Called when function calls are received and execution is about to start                                    |
 
 ```python
 @llm.event_handler("on_completion_timeout")
@@ -44490,6 +44711,31 @@ Before using Google Vertex AI LLM services, you need:
 
 <ParamField path="http_options" type="HttpOptions" default="None">
   HTTP options for the Google AI client.
+</ParamField>
+
+<ParamField path="stream_idle_timeout_secs" type="float | None" default="20.0">
+  How long to wait for the next chunk of a streamed response before giving up on
+  it. Bounds the wait when the API accepts a request and then stops producing
+  without closing the stream. This is a gap between chunks, not a limit on how
+  long a response may take overall. The first chunk is the slowest, since its
+  wait spans the whole round trip including any thinking the model does before
+  it emits anything; raise this for models configured to think at length. Set to
+  `None` to wait indefinitely. Inherited from `GoogleLLMService`.
+</ParamField>
+
+<ParamField path="retry_timeout_secs" type="float | None" default="5.0">
+  How long to wait for the first chunk before giving up on the request and
+  re-issuing it, when `retry_on_timeout` is set. Like the first-chunk wait
+  above, this window spans the whole round trip including any thinking, so it is
+  only a good fit for models that start emitting quickly. Inherited from
+  `GoogleLLMService`.
+</ParamField>
+
+<ParamField path="retry_on_timeout" type="bool | None" default="False">
+  Whether to re-issue the request once if the first chunk doesn't arrive within
+  `retry_timeout_secs`. Only the first chunk is retried: once a chunk has been
+  pushed downstream, re-issuing would duplicate the response. Inherited from
+  `GoogleLLMService`.
 </ParamField>
 
 ## Usage
@@ -44689,7 +44935,7 @@ llm = GrokLLMService(
 
 ## Notes
 
-- Grok uses incremental token reporting. The service accumulates token usage metrics during processing and reports the final totals at the end of each request.
+- Token usage is reported once per completion at the end of each request.
 - Grok supports prompt caching and reasoning tokens, which are tracked in usage metrics when available.
 
 <Tip>
@@ -44793,7 +45039,7 @@ from pipecat.services.groq import GroqLLMService
 
 llm = GroqLLMService(
     api_key=os.getenv("GROQ_API_KEY"),
-    model="llama-3.3-70b-versatile",
+    model="openai/gpt-oss-120b",
 )
 ```
 
@@ -44805,7 +45051,7 @@ from pipecat.services.groq import GroqLLMService
 llm = GroqLLMService(
     api_key=os.getenv("GROQ_API_KEY"),
     settings=GroqLLMService.Settings(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         temperature=0.7,
         top_p=0.9,
         max_completion_tokens=1024,
@@ -45571,7 +45817,7 @@ llm = NvidiaLLMService(
 
 ## Notes
 
-- **Token reporting**: NVIDIA NIM uses incremental token reporting. The service accumulates token usage metrics during processing and reports the final totals at the end of each request.
+- **Token reporting**: Token usage is reported once per completion at the end of each request.
 - **Cloud vs. local deployment**: NIM supports both cloud-hosted and on-premises deployments. For on-premises, override the `base_url` to point to your local NIM endpoint. API keys are only required for the cloud endpoint.
 - **Reasoning content**: The service automatically detects and filters reasoning content from model responses, emitting it as `LLMThought*Frame` objects. This applies to:
   - Models with API-level reasoning separation (e.g., Nemotron Nano models) that include a `reasoning_content` field
@@ -46486,7 +46732,7 @@ llm = PerplexityLLMService(
 ## Notes
 
 - Perplexity does not support function calling or tools. The service only sends messages to the API, without tool definitions.
-- Perplexity uses incremental token reporting. The service accumulates token usage metrics during processing and reports the final totals at the end of each request.
+- Token usage is reported once per completion at the end of each request.
 - Perplexity models have built-in internet search capabilities, providing up-to-date information without requiring additional tool configuration.
 - **Message transformation**: Perplexity's API enforces stricter constraints than OpenAI on conversation history structure (strict role alternation, no non-initial system messages, last message must be user/tool). The service automatically transforms messages to satisfy these constraints before sending them to the API, so you don't need to manually structure your conversation history.
 
@@ -46750,6 +46996,7 @@ llm = SambaNovaLLMService(
 
 - SambaNova does not support `frequency_penalty`, `presence_penalty`, or `seed` parameters.
 - SambaNova has custom handling for tool call indexing. The service includes compatibility logic for processing function calls from the SambaNova API.
+- Token usage reporting includes `cache_read_input_tokens` and `reasoning_tokens` when available from the provider.
 - SambaNova is known for high-throughput inference on large language models.
 
 <Tip>
@@ -47219,7 +47466,7 @@ Before using Async TTS services, you need:
   `settings=AsyncAITTSService.Settings(voice=...)` instead._
 </ParamField>
 
-<ParamField path="model" type="str" default="async_flash_v1.0" deprecated>
+<ParamField path="model" type="str" default="async_flash_v1.5" deprecated>
   TTS model to use. _Deprecated in v0.0.105. Use
   `settings=AsyncAITTSService.Settings(model=...)` instead._
 </ParamField>
@@ -47320,7 +47567,7 @@ tts = AsyncAITTSService(
     api_key=os.getenv("ASYNCAI_API_KEY"),
     settings=AsyncAITTSService.Settings(
         voice="your-voice-uuid",
-        model="async_flash_v1.0",
+        model="async_flash_v1.5",
         language=Language.ES,
     ),
 )
@@ -48020,8 +48267,10 @@ Before using Cartesia TTS services, you need:
   `settings=CartesiaTTSService.Settings(model=...)` instead._
 </ParamField>
 
-<ParamField path="cartesia_version" type="str" default="2026-03-01">
-  API version string for Cartesia service.
+<ParamField path="cartesia_version" type="str" default="None" deprecated>
+  API version string for Cartesia service. _Deprecated in v1.8.0. The service
+  sends the API version it is written against, so this parameter is no longer
+  configurable._
 </ParamField>
 
 <ParamField path="url" type="str" default="wss://api.cartesia.ai/tts/websocket">
@@ -48081,8 +48330,9 @@ The HTTP service accepts similar parameters to the WebSocket service, with these
   HTTP API base URL (instead of `url` for WebSocket).
 </ParamField>
 
-<ParamField path="cartesia_version" type="str" default="2026-03-01">
-  API version for HTTP service.
+<ParamField path="cartesia_version" type="str" default="None" deprecated>
+  API version for HTTP service. _Deprecated in v1.8.0. The service sends the API
+  version it is written against, so this parameter is no longer configurable._
 </ParamField>
 
 <ParamField path="aiohttp_session" type="aiohttp.ClientSession" default="None">
@@ -48583,11 +48833,13 @@ Before using `DeepgramFluxTTSService`, you need:
 
 Runtime-configurable settings passed via the `settings` constructor argument using `DeepgramFluxTTSService.Settings(...)`. These can be updated mid-conversation with `TTSUpdateSettingsFrame`. See [Service Settings](/pipecat/fundamentals/service-settings) for details.
 
-| Parameter  | Type              | Default             | Description                                                          |
-| ---------- | ----------------- | ------------------- | -------------------------------------------------------------------- |
-| `voice`    | `str`             | `flux-alexis-en`    | Flux voice identifier (e.g., `flux-alexis-en`, `flux-drew-en`).      |
-| `model`    | `str`             | _(synced to voice)_ | Model identifier. Automatically set to match `voice`. _(Inherited.)_ |
-| `language` | `Language \| str` | `None`              | Language for synthesis. _(Inherited.)_                               |
+| Parameter      | Type                              | Default             | Description                                                                                                                                                                                                               |
+| -------------- | --------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `voice`        | `str`                             | `flux-heather-en`   | Flux voice identifier (e.g., `flux-heather-en`, `flux-alexis-en`, `flux-cole-en`).                                                                                                                                        |
+| `speed`        | `float \| None`                   | `None`              | Speech-rate multiplier, from 0.85 to 1.15 in steps of 0.05. `None` leaves Flux at its default rate. Applied to the open connection via Flux's `Configure` message, so a speed change keeps the cross-turn acoustic state. |
+| `expressivity` | `-2 \| -1 \| 0 \| 1 \| 2 \| None` | `None`              | Expressive range on a calm-to-animated axis. `None` leaves Flux at its default range. Flux fixes expressivity when the connection opens, so a change reconnects.                                                          |
+| `model`        | `str`                             | _(synced to voice)_ | Model identifier. Automatically set to match `voice`. _(Inherited.)_                                                                                                                                                      |
+| `language`     | `Language \| str`                 | `None`              | Language for synthesis. _(Inherited.)_                                                                                                                                                                                    |
 
 <Note>
   The `model` field is automatically kept in sync with `voice` for metrics
@@ -48759,7 +49011,9 @@ from pipecat.services.deepgram.flux.tts import DeepgramFluxTTSService
 tts = DeepgramFluxTTSService(
     api_key=os.getenv("DEEPGRAM_API_KEY"),
     settings=DeepgramFluxTTSService.Settings(
-        voice="flux-alexis-en",
+        voice="flux-heather-en",
+        speed=1.05,
+        expressivity=1,
     ),
 )
 ```
@@ -48773,7 +49027,7 @@ tts = DeepgramFluxTTSService(
     api_key=os.getenv("DEEPGRAM_API_KEY"),
     text_aggregation_mode=TextAggregationMode.SENTENCE,
     settings=DeepgramFluxTTSService.Settings(
-        voice="flux-alexis-en",
+        voice="flux-heather-en",
     ),
 )
 ```
@@ -48823,9 +49077,10 @@ tts = DeepgramSageMakerTTSService(
 ### Flux notes
 
 - **Token Streaming**: By default (`TextAggregationMode.TOKEN`), LLM tokens are sent to Flux immediately without buffering for sentence boundaries. Flux internally determines synthesis boundaries, so aggregating sentences typically only adds latency.
-- **Cross-Turn Prosody**: Flux maintains acoustic state across turns on a single connection, preserving prosody and pacing throughout the conversation. This state resets on reconnection (interruption or server session timeout).
-- **Interruption Handling**: Flux does not yet provide a message to cancel the active turn. Interruptions are handled by reconnecting the websocket, which resets the cross-turn prosody state. Once Deepgram ships the planned `Interrupt` message, interruptions will be handled without reconnection.
-- **Sample Rate Validation**: Only the rates 8000, 16000, 24000, 32000, 44100, and 48000 Hz are supported. An explicit unsupported rate raises a `ValueError` at initialization.
+- **Cross-Turn Prosody**: Flux maintains acoustic state across turns on a single connection, preserving prosody and pacing throughout the conversation. This state survives interruptions and persists for the life of the connection (or until the server's one-hour session timeout).
+- **Interruption Handling**: Interruptions are handled by sending Flux's `Interrupt` message to cancel the active turn without closing the connection, so the cross-turn acoustic state that keeps a voice consistent survives a barge-in. Because an interruption no longer closes the connection, `on_connected` and `on_disconnected` stop firing on every barge-in.
+- **Voice Controls**: `speed` (0.85 to 1.15) is applied to the open connection with Flux's `Configure` message, so a speed change keeps the cross-turn acoustic state. `expressivity` (-2 to 2) is fixed when the connection opens, so a change reconnects.
+- **Sample Rate**: The supported rates are 8000, 16000, 24000, 32000, 44100, and 48000 Hz. An unsupported rate is reported as a warning when connecting but does not raise a `ValueError`.
 - **Audio Format**: Flux audio is always returned as linear PCM (`linear16`), the format used internally by Pipecat pipelines.
 
 ## Event Handlers
@@ -49213,7 +49468,7 @@ Before using Fish Audio TTS services, you need:
   Use `settings=FishAudioTTSService.Settings(voice=...)` instead.
 </ParamField>
 
-<ParamField path="model_id" type="str" default="s2-pro" deprecated>
+<ParamField path="model_id" type="str" default="s2.1-pro" deprecated>
   Fish Audio TTS model to use.
 
 _Deprecated in v0.0.105. Use `settings=FishAudioTTSService.Settings(...)` instead._
@@ -49278,7 +49533,7 @@ tts = FishAudioTTSService(
     api_key=os.getenv("FISH_API_KEY"),
     settings=FishAudioTTSService.Settings(
         voice="your-voice-reference-id",
-        model="s2-pro",
+        model="s2.1-pro",
         prosody_speed=1.2,
         prosody_volume=3,
         latency="balanced",
@@ -49429,6 +49684,178 @@ complete runnable example wiring a WebSocket transport → STT → LLM → TTS.
 Built and verified against Pipecat v1.7.0+. Check the [source
 repository](https://github.com/Floe-Labs/pipecat-floe) for the latest tested
 version and changelog.
+
+# Gandr Text-to-Speech
+Source: https://docs.pipecat.ai/api-reference/server/services/tts/gandr.md
+
+GandrTTSService streams speech over a persistent WebSocket, holding one connection warm across turns.
+
+## Overview
+
+`GandrTTSService` converts text to speech using [Gandr](https://gandr.ai). It
+holds a single WebSocket open and reuses it across turns rather than opening
+one per utterance, which is what keeps steady-state first-audio latency low.
+
+<CardGroup cols={2}>
+  <Card
+    title="Source Repository"
+    icon="github"
+    href="https://github.com/Gandr-AI/gandr-pipecat"
+  >
+    Source code, examples, and issues for the Gandr integration
+  </Card>
+  <Card title="Gandr Website" icon="book" href="https://gandr.ai">
+    Voices, languages, and pricing
+  </Card>
+  <Card title="API Keys" icon="key" href="https://gandr.ai/join/">
+    Create a Gandr API key
+  </Card>
+  <Card title="API Reference" icon="code" href="https://gandr.ai/docs">
+    The full HTTP and WebSocket contract
+  </Card>
+</CardGroup>
+
+## Installation
+
+This is a community-maintained package distributed separately from
+`pipecat-ai`:
+
+```bash
+uv add pipecat-gandr
+```
+
+## Prerequisites
+
+1. **Gandr account**: sign up at [gandr.ai](https://gandr.ai)
+2. **API key**: a `gnd_…` key from your account page
+
+### Required environment variables
+
+- `GANDR_API_KEY`: your Gandr API key (required)
+
+## Configuration
+
+<ParamField path="api_key" type="str" required>
+  Gandr API key (`gnd_…`). Raises `ValueError` if empty or whitespace.
+</ParamField>
+
+<ParamField path="url" type="str" default="wss://tts.gandr.ai/ws">
+  WebSocket endpoint. Leave as the default unless you have been given a
+  different one.
+</ParamField>
+
+<ParamField path="params" type="GandrTTSService.InputParams" default="None">
+  Voice, language and expression configuration. See [Input
+  parameters](#input-parameters).
+</ParamField>
+
+<ParamField path="text_aggregation_mode" type="TextAggregationMode" default="None">
+  How incoming text is aggregated before synthesis.
+</ParamField>
+
+<ParamField path="utterance_timeout_s" type="float" default="30.0">
+  How long to wait for an utterance's closing frame before treating it as
+  failed.
+</ParamField>
+
+<ParamField path="busy_retry_s" type="float" default="0.5">
+  How long to wait before retrying after the server answers `busy`.
+</ParamField>
+
+<ParamField path="max_attempts" type="int" default="3">
+  Total attempts per utterance, including retries for `busy` and for voice
+  registration.
+</ParamField>
+
+<ParamField path="reconnect_on_interruption" type="bool" default="True">
+  On barge-in, drop and reopen the connection so the next turn's audio is not
+  queued behind audio the listener has already interrupted. See
+  [Interruptions](#interruptions).
+</ParamField>
+
+### Input parameters
+
+Passed via `params=GandrTTSService.InputParams(...)`.
+
+| Parameter       | Type    | Default        | Description                                                                   |
+| --------------- | ------- | -------------- | ----------------------------------------------------------------------------- |
+| `voice_id`      | `str`   | `"gandr-mia"`  | A stock voice (see `STOCK_VOICES`) or a `gnd:` cloned-voice identifier.        |
+| `language`      | `str`   | `"en"`         | Bare two-letter code. See [Languages](#languages).                             |
+| `sample_rate`   | `int`   | `None`         | One of 8000, 16000, 22050, 24000. Takes priority over the constructor's value. |
+| `speed`         | `float` | `None`         | 0.6-1.5, pitch preserving.                                                     |
+| `volume`        | `float` | `None`         | 0.5-2.0, soft-ceiling mastered.                                                |
+| `temperature`   | `float` | `None`         | Expression control. Omit to let the service choose.                            |
+| `cfg_weight`    | `float` | `None`         | Expression control. Omit to send nothing at all.                               |
+| `seed`          | `int`   | `None`         | Fixes the render for a reproducible result.                                    |
+| `voice_wav_b64` | `str`   | `None`         | Base64 WAV reference audio for a cloned voice, registered on first utterance.  |
+
+Stock voices: `gandr-mia`, `gandr-ava`, `gandr-jenny`, `gandr-dane`,
+`gandr-leo`, `gandr-lewis`.
+
+### Languages
+
+`language` takes a **bare two-letter code**: 23 languages are supported.
+Examples: `en`, `es`, `fr`, `de`, `pt`, `ar`, `zh`, `ja`.
+
+<Warning>
+  A region suffix such as `en-GB` or `zh-CN` is not recognised and the request
+  falls back to English **without raising an error**. If you are populating
+  this from a browser or OS locale, strip the region first.
+</Warning>
+
+## Usage example
+
+```python
+import os
+
+from pipecat_gandr import GandrTTSService
+
+tts = GandrTTSService(
+    api_key=os.getenv("GANDR_API_KEY"),
+    params=GandrTTSService.InputParams(
+        voice_id="gandr-jenny",
+        language="en",
+    ),
+)
+```
+
+A complete runnable pipeline is in
+[`examples/foundational/gandr_tts_basic.py`](https://github.com/Gandr-AI/gandr-pipecat/blob/main/examples/foundational/gandr_tts_basic.py).
+
+## Interruptions
+
+The wire protocol has no cancel frame. On barge-in the service therefore drops
+the connection and reopens it, rather than draining audio nobody is going to
+hear.
+
+Set `reconnect_on_interruption=False` to keep the connection instead and
+discard the interrupted render client-side, at the cost of the next turn
+waiting for that render to finish.
+
+## Notes
+
+<Note>
+  **The first turn on a fresh connection is slower**, roughly 700 ms while the
+  session voice cache fills. Every turn after it is materially quicker, which
+  is why the connection is held warm across turns. A benchmark that measures
+  only turn one is measuring the cache filling rather than the engine.
+</Note>
+
+<Note>
+  Requests are capped at 2,000 characters. Longer text is split losslessly by
+  `split_for_request` before sending; you do not need to pre-chunk.
+</Note>
+
+<Note>
+  Every failure path closes the turn with `TTSStoppedFrame`, so a pipeline
+  cannot hang waiting on a connection that has died.
+</Note>
+
+## Compatibility
+
+**Tested with Pipecat v1.7.0** on Python 3.12.11: clean virtual environment,
+install, import, unit tests, and service construction. Declared support is
+`pipecat-ai>=0.0.108,<2.0.0`.
 
 # Gnani Text-to-Speech
 Source: https://docs.pipecat.ai/api-reference/server/services/tts/gnani.md
@@ -51272,7 +51699,7 @@ tts = LmntTTSService(
     api_key=os.getenv("LMNT_API_KEY"),
     settings=LmntTTSService.Settings(
         voice="lily",
-        model="aurora",
+        model="blizzard",
         language=Language.ES,
     ),
 )
@@ -51523,9 +51950,10 @@ _Deprecated in v0.0.105. Use `settings=MiniMaxHttpTTSService.Settings(...)` inst
 
 </ParamField>
 
-<ParamField path="model" type="str" default="speech-02-turbo" deprecated>
-  TTS model name. Options include `speech-2.6-hd`, `speech-2.6-turbo`,
-  `speech-02-hd`, `speech-02-turbo`, `speech-01-hd`, `speech-01-turbo`.
+<ParamField path="model" type="str" default="speech-2.8-turbo" deprecated>
+  TTS model name. Options include `speech-2.8-turbo`, `speech-2.6-hd`,
+  `speech-2.6-turbo`, `speech-02-hd`, `speech-02-turbo`, `speech-01-hd`,
+  `speech-01-turbo`.
 
 _Deprecated in v0.0.105. Use `settings=MiniMaxHttpTTSService.Settings(...)` instead._
 
@@ -54867,6 +55295,96 @@ async def on_connected(service):
     print("Connected to Smallest AI")
 ```
 
+# SonexLabs Text-to-Speech
+Source: https://docs.pipecat.ai/api-reference/server/services/tts/sonex.md
+
+SonexTTSService converts text to speech with SonexLabs' streaming TTS API.
+
+## Overview
+
+`SonexTTSService` converts text into speech using [SonexLabs'](https://sonexlabs.com)
+streaming text-to-speech API. It streams audio over HTTP with connection
+keep-alive for low time-to-first-audio, and supports multiple voices and
+languages, with automatic language detection when none is specified.
+
+<CardGroup cols={2}>
+  <Card
+    title="Source Repository"
+    icon="github"
+    href="https://github.com/sonexlabs/pipecat-sonex"
+  >
+    Source code, examples, and issues for the SonexLabs integration
+  </Card>
+  <Card title="SonexLabs" icon="book" href="https://sonexlabs.com">
+    Learn more about SonexLabs' text-to-speech service
+  </Card>
+</CardGroup>
+
+## Installation
+
+This is a community-maintained package distributed separately from `pipecat-ai`:
+
+```bash
+uv add pipecat-sonex
+```
+
+## Prerequisites
+
+### SonexLabs Account Setup
+
+Before using the SonexLabs text-to-speech service, you need:
+
+1. **SonexLabs Account**: Sign up at [SonexLabs](https://sonexlabs.com)
+2. **API Key**: Generate an API key from your account dashboard
+3. **Voice Selection**: Pick a voice ID from your account's available voices
+
+### Required Environment Variables
+
+- `SONEX_API_KEY`: Your SonexLabs API key for authentication
+
+## Configuration
+
+<ParamField path="api_key" type="str" required>
+  SonexLabs API key.
+</ParamField>
+
+<ParamField path="voice" type="str" required>
+  Voice ID to use for synthesis.
+</ParamField>
+
+<ParamField path="language" type="str" default="None">
+  Optional language override. Leave unset to auto-detect from the input text.
+</ParamField>
+
+<ParamField path="settings" type="SonexTTSService.Settings" default="None">
+  Runtime-configurable settings, such as `speed`.
+</ParamField>
+
+## Usage
+
+```python
+from pipecat_sonex import SonexTTSService
+
+tts = SonexTTSService(
+    api_key=os.getenv("SONEX_API_KEY"),
+    voice=os.getenv("SONEX_VOICE_ID"),
+)
+
+pipeline = Pipeline([
+    transport.input(),
+    stt,
+    context_aggregator.user(),
+    llm,
+    tts,
+    transport.output(),
+    context_aggregator.assistant(),
+])
+```
+
+## Compatibility
+
+Tested with Pipecat v1.7.0.
+
 # Soniox Text-to-Speech
 Source: https://docs.pipecat.ai/api-reference/server/services/tts/soniox.md
 
@@ -54976,8 +55494,8 @@ Runtime-configurable settings passed via the `settings` constructor argument usi
 
 | Parameter  | Type              | Default       | Description                                                                                                                                                                         |
 | ---------- | ----------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`    | `str`             | `tts-rt-v1`   | TTS model identifier. _(Inherited from base settings.)_                                                                                                                             |
-| `voice`    | `str`             | `Adrian`      | Voice name (e.g. `"Adrian"`) or the UUID of a cloned voice in the project owning the API key. _(Inherited from base settings.)_                                                     |
+| `model`    | `str`             | `tts-rt-v2`   | TTS model identifier. _(Inherited from base settings.)_                                                                                                                             |
+| `voice`    | `str`             | `Bryce`       | Voice name (e.g. `"Bryce"`) or the UUID of a cloned voice in the project owning the API key. _(Inherited from base settings.)_                                                      |
 | `language` | `Language \| str` | `Language.EN` | Language for synthesis. _(Inherited from base settings.)_ See [supported languages](https://soniox.com/docs/tts/concepts/languages).                                                |
 | `speed`    | `float \| None`   | `None`        | Speech rate multiplier in the range 0.7-1.3. `None` uses the Soniox server default (1.0). Changing this flushes the current context and starts a new stream with the updated value. |
 
@@ -55003,8 +55521,8 @@ tts = SonioxTTSService(
 tts = SonioxTTSService(
     api_key=os.getenv("SONIOX_API_KEY"),
     settings=SonioxTTSService.Settings(
-        model="tts-rt-v1",
-        voice="Adrian",
+        model="tts-rt-v2",
+        voice="Bryce",
         language="en",
     ),
 )
@@ -55053,7 +55571,7 @@ tts = SonioxTTSService(
 - **Sample rates**: When using raw PCM audio formats, the sample rate must be one of `{8000, 16000, 24000, 44100, 48000}`.
 - **Keepalive**: The service automatically sends keepalive messages every 20 seconds to prevent Soniox's idle timeout (20-30s).
 - **Text aggregation**: Sentence aggregation is enabled by default (`text_aggregation_mode=TextAggregationMode.SENTENCE`). Buffering until sentence boundaries produces more natural speech. Set `text_aggregation_mode=TextAggregationMode.TOKEN` to stream tokens directly for lower latency.
-- **Language support**: Soniox supports 60+ languages. See the [language documentation](https://soniox.com/docs/tts/concepts/languages) for the complete list.
+- **Language support**: Soniox supports 60+ languages, including Icelandic, Sundanese, and Uzbek. See the [language documentation](https://soniox.com/docs/tts/concepts/languages) for the complete list.
 - **Word-aligned text frames**: The service emits `TTSTextFrame`s aligned with word timestamps from Soniox, so the LLM context reflects only what was actually spoken at the moment of interruption. This ensures accurate conversation state when the user interrupts mid-sentence.
 
 ## Event Handlers
@@ -55071,6 +55589,168 @@ Soniox TTS supports the standard [service connection events](/api-reference/serv
 async def on_connected(service):
     print("Connected to Soniox TTS")
 ```
+
+# Speechify Text-to-Speech
+Source: https://docs.pipecat.ai/api-reference/server/services/tts/speechify.md
+
+HTTP-based TTS with SpeechifyHttpTTSService: word-level timestamps via Server-Sent Events using simba-3.2 and simba-3.0 models.
+
+## Overview
+
+`SpeechifyHttpTTSService` streams PCM audio and word-level speech marks over Server-Sent Events from Speechify's `/v1/audio/stream/with-timestamps` endpoint. Audio and timestamps arrive together, enabling word-by-word conversation context attribution and accurate interruption handling.
+
+<CardGroup cols={2}>
+  <Card
+    title="Speechify API Reference"
+    icon="code"
+    href="https://reference-server.pipecat.ai/en/latest/api/pipecat.services.speechify.tts.html"
+  >
+    Pipecat's API methods for Speechify TTS integration
+  </Card>
+  <Card
+    title="Example Implementation"
+    icon="play"
+    href="https://github.com/pipecat-ai/pipecat/blob/main/examples/voice/voice-speechify-http.py"
+  >
+    Complete example with Deepgram STT and OpenAI LLM
+  </Card>
+  <Card
+    title="Update Settings Example"
+    icon="play"
+    href="https://github.com/pipecat-ai/pipecat/blob/main/examples/update-settings/tts/tts-speechify-http.py"
+  >
+    Changing voice mid-conversation with TTSUpdateSettingsFrame
+  </Card>
+</CardGroup>
+
+## Installation
+
+```bash
+uv add "pipecat-ai[speechify]"
+```
+
+## Prerequisites
+
+Before using `SpeechifyHttpTTSService`, you need:
+
+1. **Speechify Account**: Sign up for API access
+2. **API Key**: Obtain an API key for authentication
+3. **Voice Selection**: Choose from available Speechify voice models
+
+### Required Environment Variables
+
+- `SPEECHIFY_API_KEY`: Your Speechify API key for authentication
+- `SPEECHIFY_VOICE_ID` (optional): Default voice identifier to use
+
+## Configuration
+
+<ParamField path="api_key" type="str" required>
+  Speechify API key for authentication.
+</ParamField>
+
+<ParamField path="aiohttp_session" type="aiohttp.ClientSession" required>
+  An aiohttp session for HTTP requests. You must create and manage this
+  yourself.
+</ParamField>
+
+<ParamField path="base_url" type="str" default="https://api.speechify.ai">
+  Base URL for the Speechify API.
+</ParamField>
+
+<ParamField path="sample_rate" type="int" default="None">
+  Audio sample rate in Hz. When `None`, uses the pipeline's configured sample
+  rate. Must be one of: 8000, 16000, 22050, 24000, 44100, 48000. If the
+  requested rate is not supported, the service synthesizes at 24000 Hz and the
+  output transport will resample.
+</ParamField>
+
+<ParamField
+  path="settings"
+  type="SpeechifyHttpTTSService.Settings"
+  default="None"
+>
+  Runtime-configurable settings. See [SpeechifyHttpTTSService
+  Settings](#speechifyhttpttsservice-settings) below.
+</ParamField>
+
+<ParamField
+  path="text_aggregation_mode"
+  type="TextAggregationMode"
+  default="None"
+>
+  How to aggregate incoming text before synthesis. Controls whether text is
+  buffered into sentences or sent immediately.
+</ParamField>
+
+### SpeechifyHttpTTSService Settings
+
+Runtime-configurable settings passed via the `settings` constructor argument using `SpeechifyHttpTTSService.Settings(...)`. These can be updated mid-conversation with `TTSUpdateSettingsFrame`. See [Service Settings](/pipecat/fundamentals/service-settings) for details.
+
+| Parameter                | Type              | Default     | Description                                                                             |
+| ------------------------ | ----------------- | ----------- | --------------------------------------------------------------------------------------- |
+| `voice`                  | `str`             | `geffen_32` | Voice identifier (e.g., `geffen_32`, `beatrice_32`).                                    |
+| `model`                  | `str`             | `simba-3.2` | Model identifier. Use `simba-3.2` for English or `simba-3.0` for multilingual.          |
+| `language`               | `Language \| str` | `None`      | Language for synthesis. Supported: DE, EN, ES, FR, IT, PT. _(Inherited.)_               |
+| `loudness_normalization` | `bool \| None`    | `None`      | Whether to normalize audio loudness to a standard level. Adds latency.                  |
+| `text_normalization`     | `bool \| None`    | `None`      | Whether to spell out numbers, dates, and similar tokens before synthesis. Adds latency. |
+
+## Usage
+
+### Basic Setup
+
+```python
+import os
+import aiohttp
+from pipecat.services.speechify.tts import SpeechifyHttpTTSService
+
+async with aiohttp.ClientSession() as session:
+    tts = SpeechifyHttpTTSService(
+        api_key=os.getenv("SPEECHIFY_API_KEY"),
+        aiohttp_session=session,
+        settings=SpeechifyHttpTTSService.Settings(
+            voice="geffen_32",
+            model="simba-3.2",
+        ),
+    )
+```
+
+### Multilingual Setup
+
+For languages other than English, use the `simba-3.0` model:
+
+```python
+from pipecat.transcriptions.language import Language
+
+tts = SpeechifyHttpTTSService(
+    api_key=os.getenv("SPEECHIFY_API_KEY"),
+    aiohttp_session=session,
+    settings=SpeechifyHttpTTSService.Settings(
+        voice="your_voice_id",
+        model="simba-3.0",
+        language=Language.ES,
+    ),
+)
+```
+
+### Changing Voice Mid-Conversation
+
+```python
+from pipecat.frames.frames import TTSUpdateSettingsFrame
+
+# Update to a different voice during the conversation
+await worker.queue_frame(
+    TTSUpdateSettingsFrame(
+        delta=SpeechifyHttpTTSService.Settings(voice="beatrice_32")
+    )
+)
+```
+
+## Notes
+
+- **Speech marks requirement**: Word-level timestamps are only produced by the streaming-native models `simba-3.2` (English) and `simba-3.0` (multilingual). The legacy `simba-english` and `simba-multilingual` models cannot produce speech marks and are rejected by the `/v1/audio/stream/with-timestamps` endpoint.
+- **Sample rate validation**: If the requested sample rate is not one of the supported values (8000, 16000, 22050, 24000, 44100, 48000 Hz), the service synthesizes at 24000 Hz by default and logs a warning. The output transport will handle any necessary resampling.
+- **Supported languages**: The service supports German (DE), English (EN), Spanish (ES), French (FR), Italian (IT), and Portuguese (PT). Languages outside this set fall back to their BCP-47 tag value with a warning.
+- **HTTP-based service**: Unlike WebSocket-based TTS services, `SpeechifyHttpTTSService` processes each synthesis request over HTTP with Server-Sent Events streaming. The service handles interruptions by tracking word-level timestamps.
 
 # Speechmatics Text-to-Speech
 Source: https://docs.pipecat.ai/api-reference/server/services/tts/speechmatics.md
@@ -58075,11 +58755,11 @@ _Deprecated in v0.0.105. Use `settings=GrokRealtimeLLMService.Settings(session_p
 
 Runtime-configurable settings passed via the `settings` constructor argument using `GrokRealtimeLLMService.Settings(...)`. These can be updated mid-conversation with `LLMUpdateSettingsFrame`. See [Service Settings](/pipecat/fundamentals/service-settings) for details.
 
-| Parameter            | Type                | Default                       | Description                                                                                          |
-| -------------------- | ------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `model`              | `str`               | `"grok-voice-think-fast-1.0"` | Model identifier. Defaults to xAI's recommended Voice Agent model. _(Inherited from base settings.)_ |
-| `system_instruction` | `str`               | `NOT_GIVEN`                   | System instruction/prompt. _(Inherited from base settings.)_                                         |
-| `session_properties` | `SessionProperties` | `NOT_GIVEN`                   | Session-level configuration (voice, audio config, tools, etc.).                                      |
+| Parameter            | Type                | Default               | Description                                                                                          |
+| -------------------- | ------------------- | --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `model`              | `str`               | `"grok-voice-latest"` | Model identifier. Defaults to xAI's recommended Voice Agent alias. _(Inherited from base settings.)_ |
+| `system_instruction` | `str`               | `NOT_GIVEN`           | System instruction/prompt. _(Inherited from base settings.)_                                         |
+| `session_properties` | `SessionProperties` | `NOT_GIVEN`           | Session-level configuration (voice, audio config, tools, etc.).                                      |
 
 <Note>
   `NOT_GIVEN` values are omitted, letting the service use its own defaults. Only
@@ -58094,7 +58774,22 @@ Runtime-configurable settings passed via the `settings` constructor argument usi
 | `voice`          | `str`                | `"eve"`                            | Voice the model uses to respond. Accepts any built-in voice ID (see [xAI's voice catalogue](https://docs.x.ai/docs/guides/voice/agent)) or a custom voice ID from the Custom Voices API. Case-insensitive. |
 | `turn_detection` | `TurnDetection`      | `TurnDetection(type="server_vad")` | Turn detection configuration. Set to `None` for manual turn detection.                                                                                                                                     |
 | `audio`          | `AudioConfiguration` | `None`                             | Configuration for input and output audio formats.                                                                                                                                                          |
-| `tools`          | `List[GrokTool]`     | `None`                             | Available tools: `web_search`, `x_search`, `file_search`, or custom `function` tools.                                                                                                                      |
+| `tools`          | `List[GrokTool]`     | `None`                             | Available tools: `web_search`, `x_search`, `file_search`, `mcp`, or custom `function` tools.                                                                                                               |
+| `reasoning`      | `Reasoning`          | `None`                             | Reasoning effort controls. Set `effort="high"` to enable reasoning or `effort="none"` to disable.                                                                                                          |
+| `resumption`     | `SessionResumption`  | `None`                             | Session resumption opt-in. Set `enabled=True` to cache conversation history for reconnection.                                                                                                              |
+| `replace`        | `dict[str, str]`     | `None`                             | Pronunciation replacement map applied before TTS (e.g., `{"Acme": "Ack-mee"}`).                                                                                                                            |
+
+### TurnDetection
+
+The `turn_detection` field in `SessionProperties` configures voice activity detection and turn management:
+
+| Parameter             | Type    | Default | Description                                                                        |
+| --------------------- | ------- | ------- | ---------------------------------------------------------------------------------- |
+| `type`                | `str`   | `None`  | Detection type: `"server_vad"` for automatic detection, `None` for manual control. |
+| `threshold`           | `float` | `None`  | VAD activation threshold (0.1–0.9). Higher values require louder audio.            |
+| `silence_duration_ms` | `int`   | `None`  | Milliseconds of silence before the server ends the user turn.                      |
+| `prefix_padding_ms`   | `int`   | `None`  | Audio (ms) included before detected speech start.                                  |
+| `idle_timeout_ms`     | `int`   | `None`  | Milliseconds of silence after assistant response before proactive check-in.        |
 
 ### AudioConfiguration
 
@@ -58102,17 +58797,29 @@ The `audio` field in `SessionProperties` accepts an `AudioConfiguration` with `i
 
 **AudioInput** (`audio.input`):
 
-| Parameter | Type          | Default | Description                                                                                                               |
-| --------- | ------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `format`  | `AudioFormat` | `None`  | Input audio format. Supports `PCMAudioFormat` (configurable rate), `PCMUAudioFormat` (8kHz), or `PCMAAudioFormat` (8kHz). |
+| Parameter       | Type                        | Default | Description                                                                                                               |
+| --------------- | --------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `format`        | `AudioFormat`               | `None`  | Input audio format. Supports `PCMAudioFormat` (configurable rate), `PCMUAudioFormat` (8kHz), or `PCMAAudioFormat` (8kHz). |
+| `transcription` | `InputAudioTranscription`   | `None`  | Transcription settings. Set `model="grok-transcribe"` for streaming user captions.                                        |
+| `transport`     | `Literal["json", "binary"]` | `None`  | Wire path for input audio.                                                                                                |
 
 **AudioOutput** (`audio.output`):
 
-| Parameter | Type          | Default | Description                                        |
-| --------- | ------------- | ------- | -------------------------------------------------- |
-| `format`  | `AudioFormat` | `None`  | Output audio format. Same format options as input. |
+| Parameter   | Type                        | Default | Description                                        |
+| ----------- | --------------------------- | ------- | -------------------------------------------------- |
+| `format`    | `AudioFormat`               | `None`  | Output audio format. Same format options as input. |
+| `speed`     | `float`                     | `None`  | Playback speed multiplier (0.7–1.5).               |
+| `transport` | `Literal["json", "binary"]` | `None`  | Wire path for assistant audio.                     |
 
 Grok PCM audio supports sample rates: 8000, 16000, 21050, 24000, 32000, 44100, and 48000 Hz.
+
+**InputAudioTranscription** (`audio.input.transcription`):
+
+| Parameter       | Type        | Default | Description                                                               |
+| --------------- | ----------- | ------- | ------------------------------------------------------------------------- |
+| `model`         | `str`       | `None`  | Transcription model. Use `"grok-transcribe"` for streaming user captions. |
+| `language_hint` | `str`       | `None`  | BCP-47 language code to bias ASR (e.g., `"en-US"`).                       |
+| `keyterms`      | `list[str]` | `None`  | Domain terms to bias transcription (max 100 terms, ≤50 chars each).       |
 
 ### Built-in Tools
 
@@ -58123,6 +58830,7 @@ Grok provides several built-in tools in addition to custom function tools:
 | `WebSearchTool`  | `web_search`  | Search the web for current information                             |
 | `XSearchTool`    | `x_search`    | Search X (Twitter) for posts. Supports `allowed_x_handles` filter. |
 | `FileSearchTool` | `file_search` | Search uploaded document collections by `vector_store_ids`         |
+| `McpTool`        | `mcp`         | Remote MCP tool configuration managed by xAI                       |
 
 ## Usage
 
@@ -58227,11 +58935,39 @@ await worker.queue_frame(
   details.
 </Tip>
 
+## Methods
+
+### delete_conversation_item
+
+```python
+await service.delete_conversation_item(item_id: str)
+```
+
+Delete a conversation item by ID. Sends a `conversation.item.delete` event to the server.
+
+**Parameters:**
+
+- `item_id` (`str`): ID of the conversation item to delete
+
+### force_message
+
+```python
+await service.force_message(text: str)
+```
+
+Speak a hard-coded TTS line without involving the LLM. Sends a `force_message` conversation item. The server automatically injects the response lifecycle, so no `response.create` call is needed.
+
+**Parameters:**
+
+- `text` (`str`): Verbatim text to synthesize and play
+
 ## Notes
 
+- **Model versioning**: The default model `"grok-voice-latest"` tracks xAI's recommended Voice Agent. For stability, pin a specific version in settings (e.g., `model="grok-voice-think-fast-1.0"`).
 - **Audio format auto-configuration**: If audio format is not specified in `session_properties`, the service automatically configures PCM input/output using the pipeline's sample rates.
 - **Server-side VAD**: Enabled by default. When VAD is enabled, the server handles speech detection and turn management automatically. Set `turn_detection` to `None` for manual turn detection.
-- **Audio before setup**: Audio is not sent to Grok until the conversation setup is complete, preventing sample rate mismatches.
+- **Audio flow timing**: User audio flows after `session.updated` is received. Audio-only pipelines work without explicitly calling `_create_response`.
+- **Interruption handling**: Interruptions send `response.cancel` to stop in-flight assistant audio on the wire and `conversation.item.truncate` to align server-side history with what the user heard. With server VAD enabled, the input buffer is preserved (not cleared) so interrupting user speech remains intact. Manual turn mode clears the input buffer on interruption.
 - **Voice IDs**: Accepts any built-in voice ID from [xAI's catalogue](https://docs.x.ai/docs/guides/voice/agent) or a custom voice ID from the Custom Voices API. Voice IDs are case-insensitive. Default is `"eve"`.
 - **G.711 support**: PCMU and PCMA formats are supported at a fixed 8000 Hz rate, useful for telephony integrations.
 - **System instruction precedence**: The `system_instruction` from service settings takes precedence over an initial system message in the LLM context. A warning is logged when both are set.
@@ -58239,10 +58975,15 @@ await worker.queue_frame(
 
 ## Event Handlers
 
-| Event                          | Description                                                   |
-| ------------------------------ | ------------------------------------------------------------- |
-| `on_conversation_item_created` | Called when a new conversation item is created in the session |
-| `on_conversation_item_updated` | Called when a conversation item is updated or completed       |
+| Event                            | Parameters                                 | Description                                                   |
+| -------------------------------- | ------------------------------------------ | ------------------------------------------------------------- |
+| `on_conversation_item_created`   | `item_id`, `item`                          | Called when a new conversation item is created in the session |
+| `on_conversation_item_updated`   | `item_id`, `item`                          | Called when a conversation item is updated or completed       |
+| `on_conversation_item_deleted`   | `item_id`                                  | Called when a conversation item is deleted                    |
+| `on_conversation_item_truncated` | `item_id`, `content_index`, `audio_end_ms` | Called when a conversation item is truncated                  |
+| `on_idle_timeout`                | `item_id`                                  | Called when the idle timeout fires (proactive check-in)       |
+| `on_dtmf_received`               | `button`                                   | Called when a DTMF digit is received (SIP sessions)           |
+| `on_mcp_event`                   | `event_type`, `event`                      | Called for MCP discovery and call lifecycle events            |
 
 ```python
 @llm.event_handler("on_conversation_item_created")
@@ -58252,6 +58993,22 @@ async def on_item_created(service, item_id, item):
 @llm.event_handler("on_conversation_item_updated")
 async def on_item_updated(service, item_id, item):
     print(f"Conversation item updated: {item_id}")
+
+@llm.event_handler("on_conversation_item_deleted")
+async def on_item_deleted(service, item_id):
+    print(f"Conversation item deleted: {item_id}")
+
+@llm.event_handler("on_idle_timeout")
+async def on_idle_timeout(service, item_id):
+    print(f"Idle timeout triggered")
+
+@llm.event_handler("on_dtmf_received")
+async def on_dtmf(service, button):
+    print(f"DTMF digit received: {button}")
+
+@llm.event_handler("on_mcp_event")
+async def on_mcp(service, event_type, event):
+    print(f"MCP event: {event_type}")
 ```
 
 # Inworld Realtime
@@ -61424,7 +62181,7 @@ self-hosted option.
 
 Enabling observability in a Pipecat app involves three steps: initialize
 Finchvox, add the `FinchvoxProcessor` to your pipeline, and enable metrics,
-tracing, and turn tracking on your `PipelineTask`.
+tracing, and turn tracking on your `PipelineWorker`.
 
 1. Initialize Finchvox at the top of your bot (e.g., `bot.py`):
 
@@ -61447,11 +62204,11 @@ pipeline = Pipeline([
 ])
 ```
 
-3. Initialize your `PipelineTask` with metrics, tracing, and turn tracking
+3. Initialize your `PipelineWorker` with metrics, tracing, and turn tracking
    enabled:
 
 ```python
-task = PipelineTask(
+worker = PipelineWorker(
     pipeline,
     params=PipelineParams(enable_metrics=True),
     enable_tracing=True,
@@ -61511,6 +62268,123 @@ The `FinchvoxProcessor` constructor accepts the following optional parameters:
 Requires Pipecat 0.0.68 or higher. Check the [source
 repository](https://github.com/finchvox/finchvox) for the latest tested version
 and changelog.
+
+# floe-guard
+Source: https://docs.pipecat.ai/api-reference/server/services/analytics/floe-guard.md
+
+A local budget guardrail for Pipecat voice agents — prices every leg (STT, LLM, TTS, telephony) and hard-stops the next turn before it crosses a spend ceiling. No account, no network.
+
+## Overview
+
+`FloeBudgetGuardProcessor` is a [floe-guard](https://github.com/Floe-Labs/floe-guard)
+budget processor for Pipecat. Drop one processor after your LLM service and it
+enforces a spend ceiling **one turn at a time** — it reserves before a turn,
+settles on the real usage the pipeline reports, and hard-stops a turn that would
+cross your budget (so a runaway agent dies at $0.10, not on the invoice). It
+prices every leg of the call — STT ($/sec), LLM ($/token), TTS ($/1k chars), and
+telephony ($/min) — from a cost map bundled with the package, so you get a
+per-call receipt with **no account, no API key, and no network calls**.
+
+<CardGroup cols={2}>
+  <Card
+    title="Source Repository"
+    icon="github"
+    href="https://github.com/Floe-Labs/floe-guard"
+  >
+    Source code, examples, and issues for floe-guard
+  </Card>
+  <Card
+    title="PyPI Package"
+    icon="cube"
+    href="https://pypi.org/project/floe-guard/"
+  >
+    The `floe-guard` package on PyPI
+  </Card>
+  <Card
+    title="Runnable demo"
+    icon="play"
+    href="https://github.com/Floe-Labs/floe-guard/blob/main/examples/voice_call_cost_pipecat.py"
+  >
+    A no-network, no-key example that prints a per-leg call receipt
+  </Card>
+  <Card
+    title="Documentation"
+    icon="book"
+    href="https://github.com/Floe-Labs/floe-guard#pipecat-voice"
+  >
+    floe-guard's Pipecat setup notes
+  </Card>
+</CardGroup>
+
+## Installation
+
+This is a community-maintained package distributed separately from `pipecat-ai`:
+
+```bash
+uv add "floe-guard[pipecat]"
+```
+
+## Prerequisites
+
+**None.** floe-guard runs entirely in your process — no account, no API key, no
+environment variables, and no network calls. Prices come from a cost map that
+ships with the package.
+
+## Configuration
+
+`FloeBudgetGuardProcessor` takes a `BudgetGuard` (your ceiling) and, optionally,
+the voice-map vendor for each leg so STT / TTS / telephony are priced
+automatically:
+
+| Parameter | Description |
+| --- | --- |
+| `guard` | The `BudgetGuard` instance to enforce, e.g. `BudgetGuard(limit_usd=1.00)`. |
+| `stt_model` | Voice-map vendor key for the STT leg, e.g. `"deepgram-nova-3"` ($/sec). |
+| `tts_model` | Voice-map vendor key for the TTS leg, e.g. `"elevenlabs-flash-v2.5"` ($/1k chars). |
+| `telephony` | Voice-map vendor key for the telephony leg, e.g. `"twilio-us-inbound-local"` ($/min). |
+| `on_budget_exceeded` | Optional async callback to speak a graceful "wrapping up" line before the pipeline stops. Omit for the default hard stop. |
+
+A leg with no vendor and no per-unit override is left un-metered; an unpriceable
+vendor **fails closed** rather than metering at a silent $0. Pass a per-unit
+override for a negotiated rate.
+
+## Usage
+
+Place the processor **directly after the LLM service**, and create the
+`PipelineTask` with usage metrics enabled (Pipecat only emits usage frames when
+they are on):
+
+```python
+from floe_guard import BudgetGuard
+from floe_guard.integrations.pipecat import FloeBudgetGuardProcessor
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+
+guard = BudgetGuard(limit_usd=1.00)                  # your ceiling
+budget = FloeBudgetGuardProcessor(
+    guard,
+    stt_model="deepgram-nova-3",                     # $/sec
+    tts_model="elevenlabs-flash-v2.5",               # $/1k chars
+    telephony="twilio-us-inbound-local",             # $/min
+)
+
+pipeline = Pipeline([transport.input(), stt, llm, budget, tts, transport.output()])
+task = PipelineTask(
+    pipeline,
+    params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
+)
+```
+
+LLM and TTS auto-meter from the frames Pipecat emits. STT and telephony have no
+native usage frame, so meter them explicitly (e.g. `budget.meter_telephony(1.5)`
+for a 1.5-minute call). A blocked turn pushes a fatal `ErrorFrame` by default, or
+invokes your `on_budget_exceeded` callback. See the
+[runnable example](https://github.com/Floe-Labs/floe-guard/blob/main/examples/voice_call_cost_pipecat.py)
+— it runs with no API key and no network and prints a per-leg receipt.
+
+## Compatibility
+
+Tested with Pipecat 1.x. `floe-guard[pipecat]` requires `pipecat-ai>=1.0`.
 
 # Future AGI Observability
 Source: https://docs.pipecat.ai/api-reference/server/services/analytics/future-agi.md
@@ -61940,7 +62814,7 @@ Before using the Roark observer, you need:
 
 <ParamField path="pipecat_call_id" type="str" default="random UUID">
   Stable call identifier carried on Roark records as `pipecatCallId`. Pass the
-  same value to `PipelineTask(conversation_id=...)` when OpenTelemetry tracing
+  same value to `PipelineWorker(conversation_id=...)` when OpenTelemetry tracing
   is enabled to correlate Roark calls with traces.
 </ParamField>
 
@@ -61952,7 +62826,7 @@ the bot's audio post-TTS:
 
 ```python
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat_roark import RoarkObserver
 
 roark = RoarkObserver(
@@ -61969,7 +62843,7 @@ pipeline = Pipeline([
     context_aggregator.assistant(),
 ])
 
-task = PipelineTask(pipeline, params=PipelineParams(observers=[roark]))
+worker = PipelineWorker(pipeline, observers=[roark])
 ```
 
 That's it — transcripts, tool calls, and the stereo recording flow to Roark
@@ -62109,6 +62983,202 @@ llm = SomeLLMService(metrics=sentry_llm)
 - **Background processing**: Transactions are completed in a background task to avoid blocking the pipeline.
 - **Graceful shutdown**: On cleanup, the service flushes all pending transactions to Sentry with a 5-second timeout.
 - **Observer integration**: Metrics tracked by `SentryMetrics` are emitted as `MetricsFrame` objects downstream, enabling integration with pipeline observers like `UserBotLatencyObserver` and `MetricsLogObserver`.
+
+# Keenable Web Search
+Source: https://docs.pipecat.ai/api-reference/server/services/knowledge-retrieval/keenable.md
+
+KeenableWebSearch provides low-latency web search and page reading tools via a hosted MCP server powered by Keenable AI.
+
+## Overview
+
+`KeenableWebSearch` exposes web search and page reading capabilities to your Pipecat agents through a hosted MCP server powered by [Keenable AI](https://keenable.ai). It provides two tools that can be registered directly with your LLM context:
+
+- `search_web_pages`: Search the web for current events, news, or facts with optional site and date-range filters
+- `fetch_page_content`: Read the text content of a specific web page
+
+Pass `await search.tools()` to your `LLMContext` and the LLM auto-registers the tool handlers, allowing your agent to answer questions about current events and information beyond the model's training data.
+
+<CardGroup cols={2}>
+  <Card title="Keenable AI" icon="globe" href="https://keenable.ai">
+    Learn more about Keenable's web search and MCP services
+  </Card>
+  <Card
+    title="Example"
+    icon="code"
+    href="https://github.com/pipecat-ai/pipecat/blob/main/examples/features/features-keenable-web-search.py"
+  >
+    Complete voice agent example with web search
+  </Card>
+</CardGroup>
+
+## Installation
+
+```bash
+uv add "pipecat-ai[keenable]"
+```
+
+## Prerequisites
+
+### API Key (Optional)
+
+No API key is required to use Keenable web search — it works keyless by default using the free tier with `pro` mode. However, you can optionally provide an API key for:
+
+- Higher rate limits
+- Access to `realtime` mode (lower latency, ideal for voice agents)
+
+If you choose to use an API key, set the `KEENABLE_API_KEY` environment variable or pass it directly to the constructor.
+
+## Configuration
+
+<ParamField path="api_key" type="str | None" default="None">
+  API key for higher rate limits and access to `realtime` mode. When unset, the
+  keyless free tier is used.
+</ParamField>
+
+<ParamField
+  path="mode"
+  type="'pro' | 'realtime'"
+  default="'realtime' if keyed, else 'pro'"
+>
+  Search mode: - `"pro"`: Higher quality results - `"realtime"`: Lower latency,
+  optimized for voice (requires an account with realtime mode enabled) When
+  unset, defaults to `"realtime"` if an API key is provided, otherwise `"pro"`.
+</ParamField>
+
+## Available Tools
+
+When you call `await search.tools()`, the following tools are registered:
+
+### search_web_pages
+
+Search the web with optional filters:
+
+- **site**: Limit results to a specific domain
+- **date_range**: Filter by date range
+- **mode**: Automatically set to the configured mode (`pro` or `realtime`)
+
+### fetch_page_content
+
+Read the full text content of a specific web page by URL.
+
+## Usage
+
+### Basic Setup
+
+```python
+import os
+from pipecat.services.keenable.search import KeenableWebSearch
+from pipecat.processors.aggregators.llm_context import LLMContext
+
+# Keyless (free tier, uses "pro" mode)
+search = KeenableWebSearch()
+
+# With API key (uses "realtime" mode by default)
+search = KeenableWebSearch(api_key=os.getenv("KEENABLE_API_KEY"))
+
+# Explicit mode selection
+search = KeenableWebSearch(
+    api_key=os.getenv("KEENABLE_API_KEY"),
+    mode="realtime"
+)
+
+# Register tools with LLM context
+context = LLMContext(tools=await search.tools())
+```
+
+### Complete Voice Agent
+
+```python
+import os
+from datetime import date
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import LLMRunFrame
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.keenable.search import KeenableWebSearch
+from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
+
+# Initialize services
+stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
+tts = CartesiaTTSService(api_key=os.environ["CARTESIA_API_KEY"])
+
+system_prompt = f"""
+You are a helpful assistant with live web access.
+Today's date is {date.today():%A, %B %d, %Y}.
+
+You have two tools:
+- search_web_pages: search the web for current information
+- fetch_page_content: read specific web pages
+
+Use these tools whenever a question needs current information.
+"""
+
+llm = OpenAIResponsesLLMService(
+    api_key=os.environ["OPENAI_API_KEY"],
+    settings=OpenAIResponsesLLMService.Settings(
+        system_instruction=system_prompt,
+    ),
+)
+
+# Initialize web search
+search = KeenableWebSearch(api_key=os.getenv("KEENABLE_API_KEY"))
+
+# Create context with tools
+context = LLMContext(tools=await search.tools())
+user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+    context,
+    user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+)
+
+# Build pipeline
+pipeline = Pipeline([
+    transport.input(),
+    stt,
+    user_aggregator,
+    llm,
+    tts,
+    transport.output(),
+    assistant_aggregator,
+])
+
+worker = PipelineWorker(pipeline)
+```
+
+### Manual Connection Management
+
+The connection to Keenable's server is managed automatically, but you can control it explicitly if needed:
+
+```python
+search = KeenableWebSearch()
+
+# Explicit connection management
+await search.start()
+try:
+    tools = await search.tools()
+    # Use tools...
+finally:
+    await search.close()
+
+# Or use as async context manager
+async with KeenableWebSearch() as search:
+    tools = await search.tools()
+    # Use tools...
+```
+
+## Notes
+
+- The connection to Keenable's server is opened on the first call to `tools()` and closed automatically at pipeline teardown
+- The configured `mode` (`pro` or `realtime`) is pinned per request and hidden from the model
+- `realtime` mode requires an account with realtime mode enabled; keyless access defaults to `pro` mode
+- The `start()` method is idempotent and called automatically by `tools()`
+- The `close()` method is safe to call multiple times and from any task
 
 # Moss Knowledge Retrieval
 Source: https://docs.pipecat.ai/api-reference/server/services/knowledge-retrieval/moss.md
@@ -62353,7 +63423,7 @@ Configuration passed via the `options` constructor argument using
 ```python
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.plugins.pinch import PinchTranslatorService, TranslatorOptions
 
 async def main():
@@ -62375,8 +63445,7 @@ async def main():
         transport.output(),
     ])
 
-    task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))
-    await PipelineRunner().run(task)
+    worker = PipelineWorker(pipeline, params=PipelineParams(allow_interruptions=True))
 ```
 
 ## Compatibility
@@ -62397,8 +63466,8 @@ AICFilter enhances user speech with the ai-coustics SDK, reducing background noi
 To use AIC, you need a license key. Get started at [ai-coustics.com](https://docs.ai-coustics.com/tutorials/pipecat-quickstart).
 
 <Note>
-  This documentation covers **aic-sdk v2.x**. If you're using aic-sdk v1.x,
-  please see the [Migration Guide](#migration-guide-v1-to-v2) section below for
+  This documentation covers **aic-sdk v3.x**. If you're using aic-sdk v2.x or
+  v1.x, please see the [Migration Guide](#migration-guides) section below for
   upgrading instructions.
 </Note>
 
@@ -62442,58 +63511,6 @@ Examples: `"quail-vf-2.0-l-16khz"`, `"quail-vf-l-16khz"`, `"quail-s-16khz"`, `"q
   allows you to control the intensity of the speech enhancement applied by the
   model.
 </ParamField>
-
-## Methods
-
-### create_vad_analyzer
-
-<Warning>
-  **Deprecated in 1.4.0**: This method will be removed in Pipecat 1.6.0. Use
-  [`AICQuailVADAnalyzer`](/api-reference/server/services/vad/aic-quail-vad-analyzer)
-  instead, which provides a standalone Quail VAD 2.0 model that works
-  independently of the enhancement filter.
-</Warning>
-
-Creates an `AICVADAnalyzer` that uses the AIC model's built-in voice activity detection.
-
-```python
-def create_vad_analyzer(
-    *,
-    speech_hold_duration: float | None = None,
-    minimum_speech_duration: float | None = None,
-    sensitivity: float | None = None,
-) -> AICVADAnalyzer
-```
-
-#### VAD Parameters
-
-<ParamField path="speech_hold_duration" type="float | None" default="None">
-  Controls for how long the VAD continues to detect speech after the audio
-  signal no longer contains speech (in seconds). Range: `0.0` to `100x model
-  window length`, Default (in SDK): `0.05s`
-</ParamField>
-
-<ParamField path="minimum_speech_duration" type="float | None" default="None">
-  Controls for how long speech needs to be present in the audio signal before
-  the VAD considers it speech (in seconds). Range: `0.0` to `1.0`, Default (in
-  SDK): `0.0s`
-</ParamField>
-
-<ParamField path="sensitivity" type="float | None" default="None">
-  Controls the sensitivity (energy threshold) of the VAD. This value is used by
-  the VAD as the threshold a speech audio signal's energy has to exceed in order
-  to be considered speech. Formula: `Energy threshold = 10 ** (-sensitivity)`
-  Range: `1.0` to `15.0`, Default (in SDK): `6.0`
-</ParamField>
-
-### get_vad_context
-
-Returns the VAD context once the processor is initialized. Can be used to dynamically adjust VAD parameters at runtime.
-
-```python
-vad_ctx = aic_filter.get_vad_context()
-vad_ctx.set_parameter(VadParameter.Sensitivity, 8.0)
-```
 
 ## Input Frames
 
@@ -62664,7 +63681,31 @@ graph TD
 
 The AIC filter enhances audio before it reaches the VAD and STT stages, improving transcription accuracy in noisy environments.
 
-## Migration Guide (v1 to v2)
+## Migration Guides
+
+### Migrating from v2 to v3
+
+<Note>
+  For the complete aic-sdk migration guide including all API changes, see the
+  official [Python 2.5 to 3.0 Migration
+  Guide](https://docs.ai-coustics.com/guides/migrations/python-2-5-to-3-0).
+</Note>
+
+#### Migration Steps
+
+1. Update Pipecat to the latest version (aic-sdk v3.1.0+ is included automatically).
+2. **Remove deprecated VAD methods**: The `create_vad_analyzer()` and `get_vad_context()` methods have been removed. Use [`AICQuailVADAnalyzer`](/api-reference/server/services/vad/aic-quail-vad-analyzer) for voice activity detection.
+3. Update model selection if needed: The old default `quail-vad-2.0-xxs-16khz` no longer works with aic-sdk 3.0. See [artifacts.ai-coustics.io](https://artifacts.ai-coustics.io/) for current models.
+
+#### Breaking Changes
+
+| v2 Method/Feature       | v3 Replacement                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `create_vad_analyzer()` | Use `AICQuailVADAnalyzer` (removed in v3)                                                                        |
+| `get_vad_context()`     | Use `AICQuailVADAnalyzer` for VAD (removed in v3)                                                                |
+| Old VAD models          | `quail-vad-2.0-xxs-16khz` no longer works; use `vad-2.1-xxs-16khz` or other models from artifacts.ai-coustics.io |
+
+### Migrating from v1 to v2
 
 <Note>
   For the complete aic-sdk migration guide including all API changes, see the
@@ -62672,7 +63713,7 @@ The AIC filter enhances audio before it reaches the VAD and STT stages, improvin
   Guide](https://docs.ai-coustics.com/guides/migrations/python-1-3-to-2-0#quick-migration-checklist).
 </Note>
 
-### Migration Steps
+#### Migration Steps
 
 1. Update Pipecat to the latest version (aic-sdk v2.3.0+ is included automatically).
 2. **Update environment variable**: Change `AIC_LICENSE_KEY` to `AIC_SDK_LICENSE` in your `.env` file.
@@ -62681,7 +63722,7 @@ The AIC filter enhances audio before it reaches the VAD and STT stages, improvin
 5. **For VAD**: Replace `aic_filter.create_vad_analyzer()` with `AICQuailVADAnalyzer` for improved accuracy and independence from the enhancement filter.
 6. Update any runtime VAD adjustments to use the new VAD context API.
 
-### Breaking Changes
+#### Breaking Changes
 
 | v1 Parameter        | v2 Replacement                                                                          |
 | ------------------- | --------------------------------------------------------------------------------------- |
@@ -62694,13 +63735,14 @@ The AIC filter enhances audio before it reaches the VAD and STT stages, improvin
 
 - Requires ai-coustics license key (get one at [developers.ai-coustics.io](https://developers.ai-coustics.io))
 - **Environment variable**: Use `AIC_SDK_LICENSE` (not `AIC_LICENSE_KEY`) for authentication
-- Voice Focus 2.0 models are supported with aic-sdk 2.1.0+ (included in pipecat-ai[aic])
+- **aic-sdk 3.x required**: Version 3.1.0+ is included in `pipecat-ai[aic]`
 - Models are automatically downloaded and cached on first use
 - Supports real-time audio processing with low latency
 - Handles PCM_16 audio format (int16 samples)
 - Thread-safe for pipeline processing
 - Can be dynamically enabled/disabled via `FilterEnableFrame`
-- **For VAD**: Use [`AICQuailVADAnalyzer`](/api-reference/server/services/vad/aic-quail-vad-analyzer) instead of the deprecated `create_vad_analyzer()` method
+- **For VAD**: Use [`AICQuailVADAnalyzer`](/api-reference/server/services/vad/aic-quail-vad-analyzer) for voice activity detection
+- The filter closes its ai-coustics session when the pipeline stops
 - For available models, visit [artifacts.ai-coustics.io](https://artifacts.ai-coustics.io/)
 
 # Arctan Audio Filter
@@ -62974,7 +64016,7 @@ You can set the `model_path` directly. Alternatively, you can set the `KRISP_VIV
 
 </ParamField>
 
-<ParamField path="noise_suppression_level" type="int" default="100">
+<ParamField path="noise_suppression_level" type="float" default="100.0">
   Voice isolation level for the filter
 </ParamField>
 
@@ -63127,7 +64169,7 @@ AICQuailVADAnalyzer is a standalone voice activity detection (VAD) analyzer powe
 
 ## Overview
 
-`AICQuailVADAnalyzer` is a standalone voice activity detection (VAD) analyzer powered by ai-coustics' Quail VAD models (Quail VAD 2.0, VF VAD 2.0). Unlike the deprecated `AICVADAnalyzer` which relies on `AICFilter`'s internal VAD, this analyzer owns its own dedicated processor and can be placed anywhere in the pipeline, working independently of audio enhancement.
+`AICQuailVADAnalyzer` is a standalone voice activity detection (VAD) analyzer powered by ai-coustics' dedicated VAD models. Unlike the deprecated `AICVADAnalyzer` which relied on `AICFilter`'s internal VAD, this analyzer owns its own dedicated VAD instance and can be placed anywhere in the pipeline, working independently of audio enhancement.
 
 The analyzer reports the model's continuous raw speech probability (range `0.0` to `1.0`), which is then gated by Pipecat's `VADParams` to determine speech start and stop events. This means speech detection thresholds and timing are controlled by your `VADParams` configuration (`confidence`, `start_secs`, `stop_secs`) rather than by the SDK's internal post-processing.
 
@@ -63148,15 +64190,11 @@ uv add "pipecat-ai[aic]"
   [developers.ai-coustics.io](https://developers.ai-coustics.io).
 </ParamField>
 
-<ParamField
-  path="model_id"
-  type="str | None"
-  default='"quail-vad-2.0-xxs-16khz"'
->
-  Quail VAD model identifier. Defaults to the published standalone VAD model
-  `"quail-vad-2.0-xxs-16khz"`. See
+<ParamField path="model_id" type="str | None" default='"vad-2.1-xxs-16khz"'>
+  Dedicated VAD model identifier. Defaults to `"vad-2.1-xxs-16khz"`. See
   [artifacts.ai-coustics.io](https://artifacts.ai-coustics.io/) for the
-  catalogue. Ignored if `model_path` is provided.
+  catalogue. Ignored if `model_path` is provided. Enhancement models are
+  rejected by the SDK.
 </ParamField>
 
 <ParamField path="model_path" type="Path | None" default="None">
@@ -63320,30 +64358,32 @@ aic_vad = AICQuailVADAnalyzer(
 
 ## Comparison to Deprecated AICVADAnalyzer
 
-| Feature              | AICQuailVADAnalyzer (Recommended)                                    | AICVADAnalyzer (Deprecated)             |
+| Feature              | AICQuailVADAnalyzer (Recommended)                                    | AICVADAnalyzer (Deprecated, Removed)    |
 | -------------------- | -------------------------------------------------------------------- | --------------------------------------- |
-| **Model**            | Standalone Quail VAD models (Quail VAD 2.0, VF VAD 2.0)              | Enhancement model's internal VAD        |
-| **Independence**     | Owns its own processor                                               | Bound to `AICFilter` instance           |
+| **Model**            | Dedicated VAD models (e.g., `vad-2.1-xxs-16khz`)                     | Enhancement model's internal VAD        |
+| **Independence**     | Owns its own VAD instance                                            | Bound to `AICFilter` instance           |
 | **Audio path**       | Processes whatever the pipeline feeds it                             | Reads post-enhancement VAD state        |
 | **Output**           | Continuous raw probability gated by Pipecat's `VADParams.confidence` | Binary speech flag (0.0/1.0)            |
 | **Configuration**    | Controlled by `VADParams` (`confidence`, `start_secs`, `stop_secs`)  | Energy threshold (1.0-15.0)             |
 | **Placement**        | Can be placed anywhere in pipeline                                   | Must follow `AICFilter`                 |
 | **Use case**         | Noise-robust VAD as primary differentiator                           | Legacy coupling to enhancement pipeline |
-| **Removal timeline** | N/A (current recommended approach)                                   | Will be removed in Pipecat 1.6.0        |
+| **Removal timeline** | N/A (current recommended approach)                                   | Removed in Pipecat 1.6.0                |
 
-The Quail VAD analyzer can work with or without the AIC enhancement filter, providing flexibility in your pipeline architecture.
+The analyzer can work with or without the AIC enhancement filter, providing flexibility in your pipeline architecture.
 
 ## Notes
 
 - Requires ai-coustics license key (get one at [developers.ai-coustics.io](https://developers.ai-coustics.io))
 - **Environment variable**: Use `AIC_SDK_LICENSE` for authentication
-- Default model is `quail-vad-2.0-xxs-16khz`, optimized for 16kHz audio
+- **aic-sdk 3.x required**: Version 3.1.0+ is included in `pipecat-ai[aic]`
+- Default model is `vad-2.1-xxs-16khz`, optimized for 16kHz audio
+- **Model compatibility**: The old default `quail-vad-2.0-xxs-16khz` does not work with aic-sdk 3.0; use models from [artifacts.ai-coustics.io](https://artifacts.ai-coustics.io/)
 - Model is downloaded and cached on first use
 - Works independently of `AICFilter` - can be used with or without audio enhancement
 - Provides noise-robust speech detection in challenging acoustic environments
 - Handles PCM_16 audio format (int16 samples)
 - Thread-safe for pipeline processing
-- For available models, visit [artifacts.ai-coustics.io](https://artifacts.ai-coustics.io/)
+- The analyzer closes its ai-coustics session when the pipeline stops
 
 <Warning>
   **Behavior change in Pipecat 1.5.0**: The analyzer now reports the model's
@@ -64632,8 +65672,8 @@ Buffer size in bytes that triggers audio data events:
 </ParamField>
 
 <ParamField path="enable_turn_audio" type="bool" default="False">
-  Whether to enable per-turn audio event handlers (`on_user_turn_audio_data` and
-  `on_bot_turn_audio_data`).
+  Whether to enable per-turn audio event handlers (`on_user_turn_audio`,
+  `on_user_turn_audio_data`, `on_bot_turn_audio`, `on_bot_turn_audio_data`).
 </ParamField>
 
 <ParamField path="auto_start_recording" type="bool" default="False">
@@ -64690,6 +65730,21 @@ Check if both user and bot audio buffers contain data.
 
 **Returns:** `True` if both buffers contain audio data.
 
+## TurnAudioData
+
+The `TurnAudioData` dataclass holds one speaker's audio for a complete conversation turn:
+
+```python
+@dataclass
+class TurnAudioData:
+    turn_number: int      # The turn this audio belongs to
+    audio: bytes          # Complete turn audio as raw PCM (pauses removed)
+    sample_rate: int      # Sample rate in Hz
+    num_channels: int     # Number of channels
+```
+
+This dataclass is passed to the `on_user_turn_audio` and `on_bot_turn_audio` event handlers. Unlike the deprecated per-run events, these handlers fire once per turn with the complete audio, and include the turn number for tracking.
+
 ## Event Handlers
 
 The processor supports multiple event handlers for different audio processing workflows. Register handlers using the `@processor.event_handler()` decorator.
@@ -64732,9 +65787,46 @@ async def on_track_audio_data(buffer, user_audio: bytes, bot_audio: bytes,
 - `sample_rate`: Sample rate in Hz
 - `num_channels`: Always 1 for individual tracks
 
+### on_user_turn_audio
+
+Triggered when a turn ends, providing everything the user said during it. Requires `enable_turn_audio=True` and `enable_turn_tracking=True` on the PipelineWorker.
+
+```python
+@audiobuffer.event_handler("on_user_turn_audio")
+async def on_user_turn_audio(buffer, turn_data: TurnAudioData):
+    # Handle complete user turn audio
+    print(f"Turn {turn_data.turn_number}: {len(turn_data.audio)} bytes")
+```
+
+**Parameters:**
+
+- `buffer`: The AudioBufferProcessor instance
+- `turn_data`: A `TurnAudioData` object containing the turn number, complete audio (with pauses removed), sample rate, and number of channels
+
+### on_bot_turn_audio
+
+Triggered when a turn ends, providing everything the bot said during it. Requires `enable_turn_audio=True` and `enable_turn_tracking=True` on the PipelineWorker.
+
+```python
+@audiobuffer.event_handler("on_bot_turn_audio")
+async def on_bot_turn_audio(buffer, turn_data: TurnAudioData):
+    # Handle complete bot turn audio
+    print(f"Turn {turn_data.turn_number}: {len(turn_data.audio)} bytes")
+```
+
+**Parameters:**
+
+- `buffer`: The AudioBufferProcessor instance
+- `turn_data`: A `TurnAudioData` object containing the turn number, complete audio (with pauses removed), sample rate, and number of channels
+
 ### on_user_turn_audio_data
 
-Triggered when a user speaking turn ends. Requires `enable_turn_audio=True`.
+<Warning>
+  **Deprecated since 1.8.0**. Use `on_user_turn_audio` instead. Will be removed
+  in 2.0.0.
+</Warning>
+
+Triggered when the user stops speaking, providing that run of speech. Requires `enable_turn_audio=True`.
 
 ```python
 @audiobuffer.event_handler("on_user_turn_audio_data")
@@ -64752,7 +65844,12 @@ async def on_user_turn_audio_data(buffer, audio: bytes, sample_rate: int, num_ch
 
 ### on_bot_turn_audio_data
 
-Triggered when a bot speaking turn ends. Requires `enable_turn_audio=True`.
+<Warning>
+  **Deprecated since 1.8.0**. Use `on_bot_turn_audio` instead. Will be removed
+  in 2.0.0.
+</Warning>
+
+Triggered when the bot stops speaking, providing that run of speech. Requires `enable_turn_audio=True`.
 
 ```python
 @audiobuffer.event_handler("on_bot_turn_audio_data")
@@ -64822,6 +65919,28 @@ await worker.queue_frames([AudioBufferStartRecordingFrame()])
 # Stop recording via frame
 await worker.queue_frames([AudioBufferStopRecordingFrame()])
 ```
+
+## Working with Captured Audio
+
+Event handlers receive raw PCM audio as `bytes`. To save or upload this audio, wrap it in a WAV container using `pcm_to_wav()` from `pipecat.audio.utils`:
+
+```python
+from pipecat.audio.utils import pcm_to_wav
+
+@audiobuffer.event_handler("on_audio_data")
+async def on_audio_data(buffer, audio: bytes, sample_rate: int, num_channels: int):
+    # Convert PCM to WAV format
+    wav_data = pcm_to_wav(audio, sample_rate, num_channels)
+
+    # Save to file
+    with open("recording.wav", "wb") as f:
+        f.write(wav_data)
+
+    # Or upload to a service
+    # await upload_to_storage(wav_data)
+```
+
+The `pcm_to_wav()` function accepts `bytes`, `bytearray`, or `memoryview`, matching the types used in Pipecat pipelines.
 
 ## Integration Notes
 
@@ -66173,12 +67292,14 @@ MCPClient connects Pipecat bots to MCP (Model Context Protocol) servers and regi
 
 MCP is an open standard for enabling AI agents to interact with external data and tools. `MCPClient` provides a way to access and call tools via MCP. For example, instead of writing bespoke function call implementations for an external API, you may use an MCP server that provides a bridge to the API. _Be aware there may be security implications._ See [MCP documenation](https://github.com/modelcontextprotocol) for more details.
 
-The client maintains a persistent connection to the MCP server and must be used as an async context manager or explicitly started and closed:
+The client maintains a persistent connection to the MCP server. The connection opens automatically on the first call to `tools()` and closes at pipeline teardown:
 
 ```python
-async with MCPClient(server_params=...) as mcp:
-    tools = await mcp.register_tools(llm)
+mcp = MCPClient(server_params=...)
+context = LLMContext(messages=[...], tools=await mcp.tools())
 ```
+
+You can also scope the client with `async with MCPClient(...)` or call `start()` and `close()` explicitly.
 
 ## Installation
 
@@ -66260,6 +67381,20 @@ mcp = MCPClient(
 
 </ParamField>
 
+<ParamField path="tools_arguments" type="Dict[str, Dict[str, Any]] | None" default="None">
+  Optional dictionary mapping tool names to fixed arguments that are merged into every call of that tool. Use this for arguments the LLM shouldn't choose — a fixed search mode, an account ID, or a caller-supplied filter. Fixed arguments override any model-supplied values and are hidden from the schema the LLM sees.
+
+```python
+mcp = MCPClient(
+    server_params=server_params,
+    tools_arguments={
+        "search": {"mode": "realtime"},  # LLM only sees search(query=...), server gets search(query=..., mode="realtime")
+    },
+)
+```
+
+</ParamField>
+
 ### Input Parameters
 
 See more information regarding server params [here](https://github.com/modelcontextprotocol/python-sdk?tab=readme-ov-file#writing-mcp-clients).
@@ -66277,27 +67412,25 @@ from pipecat.services.mcp_service import MCPClient
 # Initialize an LLM
 llm = ...
 
-# Initialize and configure MCPClient with server parameters
-async with MCPClient(
+# Initialize MCPClient with server parameters
+mcp = MCPClient(
     server_params=StdioServerParameters(
         command=shutil.which("npx"),
         args=["-y", "@name/mcp-server-name@latest"],
         env={"ENV_API_KEY": "<env_api_key>"},
     )
-) as mcp:
-    # Create tools schema from the MCP server and register them with llm
-    tools = await mcp.register_tools(llm)
+)
 
-    # Create context with developer message and tools
-    context = LLMContext(
-        messages=[
-            {
-                "role": "developer",
-                "content": "You are a helpful assistant in a voice conversation. You have access to MCP tools. Keep responses concise."
-            }
-        ],
-        tools=tools
-    )
+# Create context with developer message and tools
+context = LLMContext(
+    messages=[
+        {
+            "role": "developer",
+            "content": "You are a helpful assistant in a voice conversation. You have access to MCP tools. Keep responses concise."
+        }
+    ],
+    tools=await mcp.tools()
+)
 ```
 
 ### MCP SSE Transport
@@ -66309,25 +67442,23 @@ from pipecat.services.mcp_service import MCPClient
 # Initialize an LLM
 llm = ...
 
-# Initialize and configure MCPClient with SSE server parameters
-async with MCPClient(
+# Initialize MCPClient with SSE server parameters
+mcp = MCPClient(
     server_params=SseServerParameters(
         url="https://your.mcp.server/sse",
     )
-) as mcp:
-    # Create tools schema from the MCP server and register them with llm
-    tools = await mcp.register_tools(llm)
+)
 
-    # Create context with developer message and tools
-    context = LLMContext(
-        messages=[
-            {
-                "role": "developer",
-                "content": "You are a helpful assistant in a voice conversation. You have access to MCP tools. Keep responses concise."
-            }
-        ],
-        tools=tools
-    )
+# Create context with developer message and tools
+context = LLMContext(
+    messages=[
+        {
+            "role": "developer",
+            "content": "You are a helpful assistant in a voice conversation. You have access to MCP tools. Keep responses concise."
+        }
+    ],
+    tools=await mcp.tools()
+)
 ```
 
 ### MCP Streamable HTTP Transport
@@ -66341,47 +67472,43 @@ from pipecat.services.mcp_service import MCPClient
 # Initialize an LLM
 llm = ...
 
-# Initialize and configure MCPClient with Streamable HTTP parameters
-async with MCPClient(
+# Initialize MCPClient with Streamable HTTP parameters
+mcp = MCPClient(
     server_params=StreamableHttpParameters(
         url="https://api.githubcopilot.com/mcp/",
         headers={"Authorization": f"Bearer {os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN')}"},
     )
-) as mcp:
-    # Create tools schema from the MCP server and register them with llm
-    tools = await mcp.register_tools(llm)
+)
 
-    # Create context with tools
-    context = LLMContext(tools=tools)
+# Create context with tools
+context = LLMContext(tools=await mcp.tools())
 ```
 
-### Two-Step Registration
+### Tools for LLMs with Construction-Time Tool Parameters
 
-Some LLM services (e.g. Gemini Live) require tools to be passed at construction time. Use `get_tools_schema()` to obtain the schema first, then `register_tools_schema()` to register handlers after the LLM is created.
+Some LLM services (e.g. Gemini Live) require tools to be passed at construction time. The `tools()` method returns a `ToolsSchema` with handlers already attached, so you can pass it directly to the LLM constructor.
 
 ```python
 from mcp.client.session_group import StreamableHttpParameters
 from pipecat.services.mcp_service import MCPClient
 
 # Initialize MCPClient
-async with MCPClient(
+mcp = MCPClient(
     server_params=StreamableHttpParameters(
         url="https://api.githubcopilot.com/mcp/",
         headers={"Authorization": f"Bearer {os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN')}"},
     )
-) as mcp:
-    # Step 1: Get tools schema without registering
-    tools = await mcp.get_tools_schema()
+)
 
-    # Step 2: Create LLM with tools
-    llm = GeminiLiveLLMService(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        system_instruction="You are a helpful assistant.",
-        tools=tools,
-    )
+# Get tools schema (handlers are attached automatically)
+tools = await mcp.tools()
 
-    # Step 3: Register tool handlers with the LLM
-    await mcp.register_tools_schema(tools, llm)
+# Create LLM with tools
+llm = GeminiLiveLLMService(
+    api_key=os.getenv("GOOGLE_API_KEY"),
+    system_instruction="You are a helpful assistant.",
+    tools=tools,
+)
 ```
 
 ### Multiple MCP Servers
@@ -66398,37 +67525,52 @@ from pipecat.services.mcp_service import MCPClient
 llm = ...
 
 # Set up multiple MCP clients
-async with MCPClient(
+server_a = MCPClient(
     server_params=StdioServerParameters(
         command=shutil.which("npx"),
         args=["-y", "mcp-server-a"],
         env={"API_KEY": os.getenv("SERVER_A_API_KEY")},
     )
-) as server_a, MCPClient(
+)
+server_b = MCPClient(
     server_params=StreamableHttpParameters(
         url="https://api.githubcopilot.com/mcp/",
         headers={"Authorization": f"Bearer {os.getenv('GITHUB_PERSONAL_ACCESS_TOKEN')}"},
     )
-) as server_b:
-    # Register tools from each server
-    tools_a = await server_a.register_tools(llm)
-    tools_b = await server_b.register_tools(llm)
+)
 
-    # Merge tools into a single schema
-    all_tools = ToolsSchema(
-        standard_tools=tools_a.standard_tools + tools_b.standard_tools
-    )
+# Get tools from each server
+tools_a = await server_a.tools()
+tools_b = await server_b.tools()
 
-    # Create context with combined tools
-    context = LLMContext(tools=all_tools)
+# Merge tools into a single schema
+all_tools = ToolsSchema(
+    standard_tools=tools_a.standard_tools + tools_b.standard_tools
+)
+
+# Create context with combined tools
+context = LLMContext(tools=all_tools)
 ```
 
 ## Methods
 
+<ResponseField name="tools" type="async method">
+  Gets the available MCP tools with handlers attached, ready for LLM
+  auto-registration. Starts the server connection if needed. The connection
+  closes automatically at pipeline teardown. This is the recommended way to use
+  MCP tools — pass the result to `LLMContext(tools=...)` and the handlers
+  register automatically.
+</ResponseField>
+
+```python
+async def tools(self) -> ToolsSchema
+```
+
 <ResponseField name="start" type="async method">
   Opens a persistent connection to the MCP server and initializes the session.
   The session is reused for all subsequent tool calls until `close()` is called.
-  Can also be used via async context manager instead of calling this directly.
+  Idempotent, and called automatically by `tools()`. Can also be used via async
+  context manager instead of calling this directly.
 </ResponseField>
 
 ```python
@@ -66436,8 +67578,11 @@ async def start(self) -> None
 ```
 
 <ResponseField name="close" type="async method">
-  Closes the persistent MCP connection. Safe to call multiple times or without
-  having called `start()`.
+  Closes the persistent MCP connection. Called automatically at pipeline
+  teardown once the client's tools have been registered with an LLM service.
+  Call it directly only to release the connection earlier (e.g. on client
+  disconnect). Safe to call multiple times, without having called `start()`, and
+  from a different task than the one that called `start()`.
 </ResponseField>
 
 ```python
@@ -66445,10 +67590,9 @@ async def close(self) -> None
 ```
 
 <ResponseField name="register_tools" type="async method">
-  Discovers available tools from the active session, converts their schemas to
-  Pipecat format, and registers them with the LLM service. This is equivalent to
-  calling `get_tools_schema()` followed by `register_tools_schema()`. Requires
-  the client to be started via `start()` or async context manager.
+  **Deprecated since 1.8.0.** Use `tools()` instead. Discovers available tools
+  from the active session, converts their schemas to Pipecat format, and
+  registers them with the LLM service. Will be removed in 2.0.0.
 </ResponseField>
 
 ```python
@@ -66456,10 +67600,9 @@ async def register_tools(self, llm: LLMService | LLMSwitcher) -> ToolsSchema
 ```
 
 <ResponseField name="get_tools_schema" type="async method">
-  Discovers available tools from the active session and converts their schemas
-  to Pipecat format — without registering them with an LLM. Use this when you
-  need the tools schema before the LLM is created. Requires the client to be
-  started via `start()` or async context manager.
+  **Deprecated since 1.8.0.** Use `tools()` instead. Discovers available tools
+  from the active session and converts their schemas to Pipecat format. Will be
+  removed in 2.0.0.
 </ResponseField>
 
 ```python
@@ -66467,8 +67610,8 @@ async def get_tools_schema(self) -> ToolsSchema
 ```
 
 <ResponseField name="register_tools_schema" type="async method">
-  Registers a previously obtained `ToolsSchema` with an LLM service. Use this
-  after `get_tools_schema()` once the LLM is available.
+  **Deprecated since 1.8.0.** Use `tools()` instead. Registers a previously
+  obtained `ToolsSchema` with an LLM service. Will be removed in 2.0.0.
 </ResponseField>
 
 ```python
@@ -66563,9 +67706,7 @@ You can attach multiple observers to a pipeline worker. Each observer will be no
 ```python
 worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(
-        observers=[LLMLogObserver(), TranscriptionLogObserver(), CustomObserver()],
-    ),
+    observers=[LLMLogObserver(), TranscriptionLogObserver(), CustomObserver()],
 )
 ```
 
@@ -66643,9 +67784,7 @@ from pipecat.observers.loggers.debug_log_observer import DebugLogObserver
 
 worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(
-        observers=[DebugLogObserver()],
-    ),
+    observers=[DebugLogObserver()],
 )
 ```
 
@@ -66659,14 +67798,12 @@ from pipecat.observers.loggers.debug_log_observer import DebugLogObserver
 
 worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(
-        observers=[
-            DebugLogObserver(frame_types=(
-                TranscriptionFrame,
-                InterimTranscriptionFrame
-            ))
-        ],
-    ),
+    observers=[
+        DebugLogObserver(frame_types=(
+            TranscriptionFrame,
+            InterimTranscriptionFrame
+        ))
+    ],
 )
 ```
 
@@ -66677,25 +67814,23 @@ Filter frames based on their type and source/destination:
 ```python
 from pipecat.frames.frames import InterruptionFrame, UserStartedSpeakingFrame, LLMTextFrame
 from pipecat.observers.loggers.debug_log_observer import DebugLogObserver, FrameEndpoint
-from pipecat.transports.base_output_transport import BaseOutputTransport
+from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.services.stt_service import STTService
 
 worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(
-        observers=[
-            DebugLogObserver(frame_types={
-                # Only log InterruptionFrame when source is BaseOutputTransport
-                InterruptionFrame: (BaseOutputTransport, FrameEndpoint.SOURCE),
+    observers=[
+        DebugLogObserver(frame_types={
+            # Only log InterruptionFrame when source is BaseOutputTransport
+            InterruptionFrame: (BaseOutputTransport, FrameEndpoint.SOURCE),
 
-                # Only log UserStartedSpeakingFrame when destination is STTService
-                UserStartedSpeakingFrame: (STTService, FrameEndpoint.DESTINATION),
+            # Only log UserStartedSpeakingFrame when destination is STTService
+            UserStartedSpeakingFrame: (STTService, FrameEndpoint.DESTINATION),
 
-                # Log LLMTextFrame regardless of source or destination
-                LLMTextFrame: None
-            })
-        ],
-    ),
+            # Log LLMTextFrame regardless of source or destination
+            LLMTextFrame: None
+        })
+    ],
 )
 ```
 
@@ -66752,9 +67887,7 @@ from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
 
 worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(
-        observers=[LLMLogObserver()],
-    ),
+    observers=[LLMLogObserver()],
 )
 ```
 
@@ -66791,9 +67924,7 @@ from pipecat.observers.loggers.transcription_log_observer import TranscriptionLo
 
 worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(
-        observers=[TranscriptionLogObserver()],
-    ),
+    observers=[TranscriptionLogObserver()],
 )
 ```
 
@@ -67067,7 +68198,7 @@ async def on_latency_measured(observer, latency):
 
 worker = PipelineWorker(
     pipeline,
-    params=PipelineParams(observers=[latency_observer]),
+    observers=[latency_observer],
 )
 ```
 
@@ -67089,9 +68220,9 @@ async def on_latency_breakdown(observer, breakdown):
 worker = PipelineWorker(
     pipeline,
     params=PipelineParams(
-        observers=[latency_observer],
         enable_metrics=True,  # Required for breakdown metrics
     ),
+    observers=[latency_observer],
 )
 ```
 
